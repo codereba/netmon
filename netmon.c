@@ -1,30 +1,22 @@
 /*
- * Copyright 2010 coderebasoft
+ * Copyright 2010 JiJie.Shi.
  *
  * This file is part of netmon.
+ * Licensed under the Gangoo License, Version 1.0 (the "License");
+ * you may not use this file except in compliance with the License.
  *
- * netmon is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * netmon is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with netmon.  If not, see <http://www.gnu.org/licenses/>.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #include <strsafe.h>
 #include "common.h"
 #include <tdikrnl.h>
 #include "hash.h"
-
-
-#include "netmon_.h"
+#include "netmon_global.h"
 
 extern volatile KSYSTEM_TIME KeTickCount;
 extern POBJECT_TYPE *IoFileObjectType;
@@ -42,6 +34,15 @@ DWORD TDI_FILTER_DRIVER_VERSION[] = { 1, 0, 0, 0006 };
 #define TICK_COUNT_RECORD_INIT_VAL 0xBB40E64E
 #define TICK_COUNT_RECORD_NOT_INIT_VAL 0x44BF19B1
 
+#define DEL_EVENT_WRAP 1
+#define GET_EVENT_WRAP 2
+
+#define MASTER_IRP_HASH_TABLE_SIZE 500
+
+#ifdef ALLOC_PRAGMA
+#pragma alloc_text (INIT, DriverEntry)
+#endif
+
 PKTHREAD ThreadUpdateConfig = NULL;
 PKTHREAD ThreadProcessIrp = NULL;
 
@@ -55,7 +56,7 @@ BOOL g_bBeginStartThreads = FALSE;
 DWORD g_dwTickCountFactor = TICK_COUNT_RECORD_INIT_VAL;
 DWORD g_dwTickCountFactorNot = TICK_COUNT_RECORD_NOT_INIT_VAL;
 
-#define MASTER_IRP_HASH_TABLE_SIZE 500
+\
 hash_table g_MasterIrpHash;
 
 BOOL g_bFiltering = TRUE;
@@ -79,7 +80,6 @@ KSPIN_LOCK g_SpLockTdiEventHandlerInfo;
 KEVENT g_EventProcessInformationAdded;
 KEVENT g_EventIrpListAdded;
 KEVENT g_EventCompletion;
-//KEVENT g_EventTimerExit;
 
 ERESOURCE g_SyncResource;
 
@@ -88,8 +88,6 @@ NPAGED_LOOKASIDE_LIST g_CompletionWrapList;
 LIST_ENTRY g_TdiEventHandlerInfoList;
 LIST_ENTRY g_ProcessIoInfoList;
 LIST_ENTRY g_ProcessInformationList;
-
-#define __thiscall __cdecl
 
 BOOL IsDriverDevice( PDEVICE_OBJECT pDeviceObject ); 
 
@@ -120,28 +118,6 @@ NTSTATUS  TdiFilterRecvDatagramEventHandler(
 DWORD dwBPFlag = 0;
 DWORD dwPrintFlags = IRP_CANCEL_INFO |DRIVER_ENTRY_INFO | DRIVER_UNLOAD_INFO;
 
-ULONG DebugPrintEx( DWORD dwFlags, CHAR *Format, ... )
-{
-	ULONG uRet;
-	va_list va;
-
-	if( !( dwPrintFlags & dwFlags ) )
-	{
-		return 0;
-	}
-
-	va_start( va, Format );
-
-	uRet = vDbgPrintEx( 0xFFFFFFFF, 0, Format, va );
-
-	va_end( va );
-
-	return uRet;
-}
-
-#define DEL_EVENT_WRAP 1
-#define GET_EVENT_WRAP 2
-
 BOOL g_StopWaitCompletion = FALSE;
 INT32 g_CompletionIrpCount = 0;
 PKTHREAD g_ThreadWaitCompletion = NULL;
@@ -158,7 +134,6 @@ NTSTATUS  TdiFilterCompletion( PDEVICE_OBJECT pDeviceObject, PIRP pIrp, LPVOID p
 NTSTATUS TdiFilterSyncSendProcess( PROCESS_NETWORK_TRAFFIC *pProcessNetWorkTrafficInfo, 
 								 PDEVICE_OBJECT pDeviceObject, 
 								 PIRP pIrp );
-//KDEFERRED_ROUTINE TimerDpcProcess;
 VOID ThreadSendingSpeedControl( PVOID pParam );
 VOID TimerDpcProcess( PKDPC pDpc, PVOID pEProcess, PVOID SystemArgument1 , PVOID SystemArgument2 );
 VOID DeleteProcessIoInfo( DWORD dwParentId, DWORD dwProcessId, BOOL bCreate );
@@ -213,9 +188,24 @@ NTSTATUS  GetProcessImagePath( DWORD dwProcessId, PUNICODE_STRING ProcessImageFi
 NTSTATUS RegisterProcessCreateNotify(); 
 NTSTATUS DeregisterProcessCreateNotify(); 
 
-#ifdef ALLOC_PRAGMA
-#pragma alloc_text (INIT, DriverEntry)
-#endif
+ULONG DebugPrintEx( DWORD dwFlags, CHAR *Format, ... )
+{
+	ULONG uRet;
+	va_list va;
+
+	if( !( dwPrintFlags & dwFlags ) )
+	{
+		return 0;
+	}
+
+	va_start( va, Format );
+
+	uRet = vDbgPrintEx( 0xFFFFFFFF, 0, Format, va );
+
+	va_end( va );
+
+	return uRet;
+}
 
 NTSTATUS CreateWorkThread( PKSTART_ROUTINE StartRoutine, PVOID StartContext, PKTHREAD *kThread )
 {
@@ -319,19 +309,16 @@ NTSTATUS DriverEntry( PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath 
 	InitializeListHead( &g_ProcessInformationList );
 
 	ExInitializeResourceLite(&g_SyncResource);
-		
+
 	KeInitializeEvent( &g_EventProcessInformationAdded, SynchronizationEvent, 0 );
 	KeInitializeEvent( &g_EventIrpListAdded, SynchronizationEvent, 0 );
 	KeInitializeEvent( &g_EventCompletion, SynchronizationEvent, 0 );
-		
-	g_TimerElapse.LowPart = TDI_FILTER_TIMER_ELAPSE_TIME;
-	g_TimerElapse.HighPart = 0xFFFFFFFF;
-		
-	g_SendingDelayTime.LowPart = -10000;
-	g_SendingDelayTime.HighPart = 0xFFFFFFFF;
-		
-	g_WaitNewIistItemTime.LowPart = TDI_FILTER_TIMER_ELAPSE_TIME;
-	g_WaitNewIistItemTime.HighPart = 0xFFFFFFFF;
+
+	g_TimerElapse.QuadPart = TDI_FILTER_TIMER_ELAPSE_TIME;
+
+	g_SendingDelayTime.QuadPart = -10000;
+
+	g_WaitNewIistItemTime.QuadPart = TDI_FILTER_TIMER_ELAPSE_TIME;
 
 	g_ThreadWaitConfigProcTime.LowPart = WAIT_CONFIGURED_PROC_TIME;
 	g_ThreadWaitConfigProcTime.HighPart = 0xFFFFFFFF;
@@ -471,8 +458,6 @@ VOID TdiFilterUnload( PDRIVER_OBJECT pDriverObject )
 
 	PDEVICE_OBJECT DeviceObject;
 
-	KdBreakPoint();
-
 	DebugPrintEx( DRIVER_UNLOAD_INFO, "netmon enter TdiFilterUnload\n" );
 
 	RtlInitUnicodeString( ( PUNICODE_STRING )&TdiFilterDeviceDosName, 
@@ -572,7 +557,6 @@ NTSTATUS TdiFilterCleanUp(PDEVICE_OBJECT DeviceObject, PIRP pIrp )
 	TDI_FILTER_DEVICE_EXTENSION *pDeviceExtension;
 	PIO_STACK_LOCATION pIrpSp;
 
-	//KdBreakPoint();
 	DebugPrintEx( CLEANUP_INFO, "netmon Enter TdiFilterCleanUp\n" );
 	pDeviceExtension = ( TDI_FILTER_DEVICE_EXTENSION* )DeviceObject->DeviceExtension;
 	pIrpSp = IoGetCurrentIrpStackLocation( pIrp );
@@ -728,7 +712,6 @@ NTSTATUS RestoreEventHandler( PTDI_EVENT_HANDLER_WRAP pEventHandlerWrap )
 	pIrp = NULL;
 
 	if( NT_SUCCESS( ntStatus ) ) {
-		//ASSERT( FALSE );
 		DebugPrintEx( RESTORE_EVENT_HANDLER_INFO, "net RestoreEventHandler restore event wrap 0x%0.8x, handler 0x%0.8x success \n", 
 			pEventHandlerWrap, 
 			pEventHandlerWrap->pOrgEventHandler
@@ -737,7 +720,6 @@ NTSTATUS RestoreEventHandler( PTDI_EVENT_HANDLER_WRAP pEventHandlerWrap )
 	}
 
 	// don't wait to complete
-
 RETURN_:
 	if( NULL != pIrp )
 	{
@@ -969,8 +951,6 @@ VOID TdiFilterCancel(
 	hash_key key;
 	key.quad_part = make_hash_key( 0, ( DWORD )Irp );
 
-	KdBreakPoint();
-
 	DebugPrintEx( IRP_CANCEL_INFO, "netmon Enter TdiFilterCancel\n" );
 	IoReleaseCancelSpinLock( CancelIrql );
 
@@ -1032,7 +1012,7 @@ FIND_ASSOC_IRPS:
 
 	DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterCancel delete hash item 0x%0.8x \n", 
 		Irp );
-	//KdBreakPoint();
+
 	ntStatus = del_hash_item( &g_MasterIrpHash, key, &pProcessNetWorkTraffic );
 
 	DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterCancel delete hash item 0x%0.8x, return 0x%0.8x \n", 
@@ -1040,7 +1020,6 @@ FIND_ASSOC_IRPS:
 		ntStatus );
 
 	return;
-	//ASSERT( 0 <= ntStatus );
 
 RETURN_:
 	KeReleaseSpinLock( &pProcessNetWorkTraffic->IrpListLock, OldIrql ); 
@@ -1132,7 +1111,6 @@ NTSTATUS TdiFilterInternalIoControl( PDEVICE_OBJECT pDeviceObject, PIRP pIrp )
 			TDI_RECEIVE == MinorFunction || 
 			TDI_RECEIVE_DATAGRAM == MinorFunction )
 		{
-			//KdBreakPoint();
 			DebugPrintEx( IO_INTERNAL_CONTROL_INFO, "netmon TdiFilterInternalIoControl: MinorFunction == TDI_SENDXXX, TDI_RECEIVEXXX \n" );
 
 			if( TDI_RECEIVE == MinorFunction && 
@@ -1141,8 +1119,6 @@ NTSTATUS TdiFilterInternalIoControl( PDEVICE_OBJECT pDeviceObject, PIRP pIrp )
 				DebugPrintEx( IO_INTERNAL_CONTROL_INFO, "netmon TdiFilterInternalIoControl: MinorFunction == TDI_RECEIVE recv flags == TDI_RECEIVE_PEEK \n" );
 				goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
 			}
-
-			//goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
 
 			pProcessNetWorkTrafficInfo = GetProcessNetWorkTrafficInfoFromEProcess( pEProcess );
 			if( NULL == pProcessNetWorkTrafficInfo )
@@ -1177,8 +1153,6 @@ NTSTATUS TdiFilterInternalIoControl( PDEVICE_OBJECT pDeviceObject, PIRP pIrp )
 					( TDI_SEND == MinorFunction || 
 					TDI_SEND_DATAGRAM == MinorFunction ) )
 				{
-					//KdBreakPoint();
- 
 					if( TRUE == IoIsOperationSynchronous( pIrp ) )
 					{
 						DebugPrintEx( IO_INTERNAL_CONTROL_INFO, "netmon TdiFilterInternalIoControl: IoIsOperationSynchronous return TRUE \n" );
@@ -1197,9 +1171,6 @@ NTSTATUS TdiFilterInternalIoControl( PDEVICE_OBJECT pDeviceObject, PIRP pIrp )
 						PDRIVER_CANCEL  OldCancelRoutine;
 
 						DebugPrintEx( IO_INTERNAL_CONTROL_INFO, "netmon TdiFilterInternalIoControl: add irp to process irp list \n" );
-						//ExInterlockedInsertTailList( &pProcessNetWorkTrafficInfo->IrpList, 
-						//	&pIrp->Tail.Overlay.ListEntry, 
-						//	&pProcessNetWorkTrafficInfo->IrpListLock );
 
 						IoMarkIrpPending( pIrp );
 						key.quad_part = make_hash_key( 0, ( DWORD )pIrp );
@@ -1370,7 +1341,7 @@ NTSTATUS TdiFilterInternalIoControl( PDEVICE_OBJECT pDeviceObject, PIRP pIrp )
 					pTdiSetEvent->EventHandler = TdiFilterRecvEventHandler;
 				}
 				else if( TDI_EVENT_CHAINED_RECEIVE == pTdiSetEvent->EventType ||
-					TDI_EVENT_CHAINED_RECEIVE_EXPEDITED == pTdiSetEvent->EventType )
+					     TDI_EVENT_CHAINED_RECEIVE_EXPEDITED == pTdiSetEvent->EventType )
 				{
 					pTdiSetEvent->EventHandler = TdiFilterChainedRecvHandler;
 				}
@@ -2161,10 +2132,8 @@ COMPLETE_ASSOCIATED_IRP:
 		IoSetCancelRoutine( pMasterIrp, NULL );
 
 		DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterCompletion del_hash_item 0x%0.8x \n", pMasterIrp );
-		//KdBreakPoint();
 		nRet = del_hash_item( &g_MasterIrpHash, key, NULL );
 		DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterCompletion del_hash_item 0x%0.8x return 0x%0.8x\n", pMasterIrp, nRet );
-		//ASSERT( 0 <= nRet );
 	}
 
 	DebugPrintEx( IRP_COMPLETION_INFO,  "netmon TdiFilterCompletion master irp 0x%0.8x, master irp cancel routine 0x%0.8x, return length %d, status 0x%0.8x \n", 
@@ -2205,40 +2174,169 @@ NTSTATUS TdiFilterSyncSendProcess( PPROCESS_NETWORK_TRAFFIC pProcessNetWorkTraff
 	DWORD dwSendLength;
 	DWORD dwSendedLength;
 
-	//KdBreakPoint();
 	DebugPrintEx( SYNC_SEND_IRP_PROCESS_INFO, "netmon enter TdiFilterSyncSendProcess\n" );
 
 	ASSERT( NULL == pIrp->AssociatedIrp.SystemBuffer );
 
-	//_try
-	//{
-		pDeviceExtension = ( PTDI_FILTER_DEVICE_EXTENSION )pDeviceObject->DeviceExtension;
-		pIrpSp = IoGetCurrentIrpStackLocation( pIrp );
+	pDeviceExtension = ( PTDI_FILTER_DEVICE_EXTENSION )pDeviceObject->DeviceExtension;
+	pIrpSp = IoGetCurrentIrpStackLocation( pIrp );
 
-		//goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
+	ASSERT( TDI_SEND == pIrpSp->MinorFunction || 
+		TDI_SEND_DATAGRAM == pIrpSp->MinorFunction );
 
-		ASSERT( TDI_SEND == pIrpSp->MinorFunction || 
-			TDI_SEND_DATAGRAM == pIrpSp->MinorFunction );
+	dwSendLength = ( DWORD )pIrpSp->Parameters.Others.Argument1;
 
-		dwSendLength = ( DWORD )pIrpSp->Parameters.Others.Argument1;
-
-		if( pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart >= dwSendLength )
+	if( pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart >= dwSendLength )
+	{
+		if( pIrp->CurrentLocation <= 1 )
 		{
-			if( pIrp->CurrentLocation <= 1 )
+			ASSERT( FALSE );
+			goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
+		}
+
+		for( ; ; )
+		{
+			SendedSizeOneSec.QuadPart = pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart;
+			SendedSizeOneSec.QuadPart += dwSendLength;
+
+			if( SendedSizeOneSec.QuadPart > 
+				pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
 			{
-				ASSERT( FALSE );
+				if( pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart >= dwSendLength )
+				{
+					KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
+					continue;
+				}
+				else
+				{
+					break;
+				}
+			}
+			else
+			{
+				break;
+			}
+		}
+
+		pCompletionWrap = ( PTDI_COMPLETION_WRAP )ExAllocateFromNPagedLookasideList( &g_CompletionWrapList );
+		if( NULL == pCompletionWrap )
+		{
+			goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
+		}
+
+		pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart += dwSendLength;
+		pCompletionWrap->bSendOpera = TRUE;
+		pCompletionWrap->bWrap = FALSE;
+		pCompletionWrap->bAssocIrp = FALSE;
+		pCompletionWrap->bSync = TRUE;
+
+		pCompletionWrap->pEProcess = pProcessNetWorkTrafficInfo->pEProcess;
+		pCompletionWrap->pProcessNetWorkTrafficInfo = pProcessNetWorkTrafficInfo; //must got the process inforamtion reference.
+
+		IoCopyCurrentIrpStackLocationToNext( pIrp );
+
+		IoSetCompletionRoutine( pIrp, 
+			TdiFilterCompletion, 
+			pCompletionWrap, 
+			TRUE, 
+			TRUE, 
+			TRUE
+			);
+
+		g_CompletionIrpCount ++;
+		DebugPrintEx( IRP_COMPLETION_INFO, "netmon TdiFilterSyncSendProcess  completion count++ %d\n", g_CompletionIrpCount );
+		ntStatus = IoCallDriver( pDeviceExtension->pTdiDeviceObject, pIrp );
+
+		return ntStatus;
+	}
+	else
+	{
+		dwSendedLength = 0;
+		pMdl = pIrp->MdlAddress;
+
+		if( NULL == pMdl )
+		{
+			ASSERT( FALSE );
+			goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
+		}
+
+		if( dwSendLength != MmGetMdlByteCount( pMdl ) )
+		{
+			ASSERT( FALSE );
+			goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
+		}
+
+		pMdlVA = MmGetMdlVirtualAddress( pMdl );
+
+		if( NULL == pMdlVA )
+		{
+			ASSERT( pMdlVA );
+			goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
+		}
+
+		ntStatus = STATUS_UNSUCCESSFUL;
+
+		for( ; ; )
+		{
+			if( dwSendedLength >= dwSendLength )
+			{
+				return ntStatus;
+			}
+
+			SendRequireSize.QuadPart = dwSendLength - dwSendedLength;
+
+			if( pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart < SendRequireSize.QuadPart )
+			{
+				SendRequireSize.QuadPart = pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart;
+			}
+
+			pAssocIrp = IoMakeAssociatedIrp( pIrp, pDeviceExtension->pTdiDeviceObject->StackSize );
+			if( NULL == pAssocIrp )
+			{
 				goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
 			}
 
+			pMdlAlloced = IoAllocateMdl( 
+				pMdlVA, 
+				dwSendLength, 
+				FALSE, 
+				0, 
+				pAssocIrp 
+				);
+
+			if( NULL == pMdlAlloced )
+			{
+				IoFreeIrp( pAssocIrp );
+				goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
+			}
+
+			InterlockedExchangeAdd( &pIrp->AssociatedIrp.IrpCount, 1 );
+
+			IoBuildPartialMdl( pIrp->MdlAddress, 
+				pMdlAlloced,  
+				pMdlVA + dwSendedLength, 
+				SendRequireSize.LowPart );
+
+			dwSendedLength += SendRequireSize.LowPart;
+
+			pIrpSpNext = IoGetNextIrpStackLocation( pAssocIrp );
+
+			pIrpSpNext->MajorFunction = pIrpSp->MajorFunction;
+			pIrpSpNext->MinorFunction = pIrpSp->MinorFunction;
+			pIrpSpNext->DeviceObject = pDeviceExtension->pTdiDeviceObject;
+			pIrpSpNext->FileObject = pIrpSp->FileObject;
+
+			pIrpSpNext->Parameters.Others.Argument1 = ( PVOID )SendRequireSize.LowPart;
+			pIrpSpNext->Parameters.Others.Argument2 = pIrpSp->Parameters.Others.Argument2;
+
+			pAssocIrp->MdlAddress = pMdlAlloced;
+
 			for( ; ; )
 			{
-				SendedSizeOneSec.QuadPart = pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart;
-				SendedSizeOneSec.QuadPart += dwSendLength;
-
-				if( SendedSizeOneSec.QuadPart > 
+				if( pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart + SendRequireSize.QuadPart >
 					pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
 				{
-					if( pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart >= dwSendLength )
+					if( SendRequireSize.QuadPart <= pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
 					{
 						KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
 						continue;
@@ -2260,162 +2358,29 @@ NTSTATUS TdiFilterSyncSendProcess( PPROCESS_NETWORK_TRAFFIC pProcessNetWorkTraff
 				goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
 			}
 
-			pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart += dwSendLength;
+			pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart += SendRequireSize.LowPart;
 			pCompletionWrap->bSendOpera = TRUE;
-			pCompletionWrap->bWrap = FALSE;
+			pCompletionWrap->bWrap = FALSE; //If synchronized operation, it must not have the completion routine.
 			pCompletionWrap->bAssocIrp = FALSE;
 			pCompletionWrap->bSync = TRUE;
 
 			pCompletionWrap->pEProcess = pProcessNetWorkTrafficInfo->pEProcess;
-			pCompletionWrap->pProcessNetWorkTrafficInfo = pProcessNetWorkTrafficInfo; //must got the process inforamtion reference.
+			pCompletionWrap->pProcessNetWorkTrafficInfo = pProcessNetWorkTrafficInfo;
 
-			IoCopyCurrentIrpStackLocationToNext( pIrp );
-
-			IoSetCompletionRoutine( pIrp, 
+			IoSetCompletionRoutine( pAssocIrp, 
 				TdiFilterCompletion, 
 				pCompletionWrap, 
 				TRUE, 
 				TRUE, 
-				TRUE
+				TRUE 
 				);
 
 			g_CompletionIrpCount ++;
-			DebugPrintEx( IRP_COMPLETION_INFO, "netmon TdiFilterSyncSendProcess  completion count++ %d\n", g_CompletionIrpCount );
-			ntStatus = IoCallDriver( pDeviceExtension->pTdiDeviceObject, pIrp );
-
-			return ntStatus;
+			DebugPrintEx( IRP_COMPLETION_INFO, "netmon TdiFilterSyncSendProcess completion count++ %d\n", g_CompletionIrpCount );
+			ntStatus = IoCallDriver( pIrpSpNext->DeviceObject, pAssocIrp );
+			ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
 		}
-		else
-		{
-			dwSendedLength = 0;
-			pMdl = pIrp->MdlAddress;
-
-			if( NULL == pMdl )
-			{
-				ASSERT( FALSE );
-				goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
-			}
-
-			if( dwSendLength != MmGetMdlByteCount( pMdl ) )
-			{
-				ASSERT( FALSE );
-				goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
-			}
-
-			pMdlVA = MmGetMdlVirtualAddress( pMdl );
-
-			if( NULL == pMdlVA )
-			{
-				ASSERT( pMdlVA );
-				goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
-			}
-
-			ntStatus = STATUS_UNSUCCESSFUL;
-
-			for( ; ; )
-			{
-				if( dwSendedLength >= dwSendLength )
-				{
-					return ntStatus;
-				}
-
-				SendRequireSize.QuadPart = dwSendLength - dwSendedLength;
-
-				if( pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart < SendRequireSize.QuadPart )
-				{
-					SendRequireSize.QuadPart = pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart;
-				}
-
-				pAssocIrp = IoMakeAssociatedIrp( pIrp, pDeviceExtension->pTdiDeviceObject->StackSize );
-				if( NULL == pAssocIrp )
-				{
-					goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
-				}
-
-				pMdlAlloced = IoAllocateMdl( 
-					pMdlVA, 
-					dwSendLength, 
-					FALSE, 
-					0, 
-					pAssocIrp 
-					);
-
-				if( NULL == pMdlAlloced )
-				{
-					IoFreeIrp( pAssocIrp );
-					goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
-				}
-
-				InterlockedExchangeAdd( &pIrp->AssociatedIrp.IrpCount, 1 );
-
-				IoBuildPartialMdl( pIrp->MdlAddress, 
-					pMdlAlloced,  
-					pMdlVA + dwSendedLength, 
-					SendRequireSize.LowPart );
-
-				dwSendedLength += SendRequireSize.LowPart;
-
-				pIrpSpNext = IoGetNextIrpStackLocation( pAssocIrp );
-
-				pIrpSpNext->MajorFunction = pIrpSp->MajorFunction;
-				pIrpSpNext->MinorFunction = pIrpSp->MinorFunction;
-				pIrpSpNext->DeviceObject = pDeviceExtension->pTdiDeviceObject;
-				pIrpSpNext->FileObject = pIrpSp->FileObject;
-
-				pIrpSpNext->Parameters.Others.Argument1 = ( PVOID )SendRequireSize.LowPart;
-				pIrpSpNext->Parameters.Others.Argument2 = pIrpSp->Parameters.Others.Argument2;
-
-				pAssocIrp->MdlAddress = pMdlAlloced;
-
-				for( ; ; )
-				{
-					if( pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart + SendRequireSize.QuadPart >
-						pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
-					{
-						if( SendRequireSize.QuadPart <= pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
-						{
-							KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
-							continue;
-						}
-						else
-						{
-							break;
-						}
-					}
-					else
-					{
-						break;
-					}
-				}
-
-				pCompletionWrap = ( PTDI_COMPLETION_WRAP )ExAllocateFromNPagedLookasideList( &g_CompletionWrapList );
-				if( NULL == pCompletionWrap )
-				{
-					goto SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER;
-				}
-
-				pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart += SendRequireSize.LowPart;
-				pCompletionWrap->bSendOpera = TRUE;
-				pCompletionWrap->bWrap = FALSE; //If synchronized operation, it must not have the completion routine.
-				pCompletionWrap->bAssocIrp = FALSE;
-				pCompletionWrap->bSync = TRUE;
-
-				pCompletionWrap->pEProcess = pProcessNetWorkTrafficInfo->pEProcess;
-				pCompletionWrap->pProcessNetWorkTrafficInfo = pProcessNetWorkTrafficInfo;
-
-				IoSetCompletionRoutine( pAssocIrp, 
-					TdiFilterCompletion, 
-					pCompletionWrap, 
-					TRUE, 
-					TRUE, 
-					TRUE 
-					);
-
-				g_CompletionIrpCount ++;
-				DebugPrintEx( IRP_COMPLETION_INFO, "netmon TdiFilterSyncSendProcess completion count++ %d\n", g_CompletionIrpCount );
-				ntStatus = IoCallDriver( pIrpSpNext->DeviceObject, pAssocIrp );
-				ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );			}
-		}
+	}
 
 SKIP_CURRENT_STACK_LOCATION_CALL_PDO_DRIVER:
 	IoSkipCurrentIrpStackLocation( pIrp );
@@ -2477,106 +2442,15 @@ VOID ThreadSendingSpeedControl( PVOID pParam )
 
 	DebugPrintEx( SEND_SPEED_CONTROL_INFO,  "netmon Enter ThreadSendingSpeedControl\n" );
 
-		for( ; ; )
+	for( ; ; )
+	{
+		if( TRUE == g_bThreadIrpProcessStop )
 		{
-			if( TRUE == g_bThreadIrpProcessStop )
-			{
-				InitializeListHead( &AllProcessIoList );
-				KeAcquireSpinLock( &g_SpLockProcessNetWorkTrafficInfo, &OldIrql );
-				
-				pListEntry = g_ProcessIoInfoList.Flink;
-				
-				for( ; ; )
-				{
-					if( pListEntry == &g_ProcessIoInfoList )
-					{
-						break;
-					}
-
-					pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
-
-					InterlockedExchangeAdd( 
-						&pProcessNetWorkTrafficInfo->dwRefCount, 
-						1 );
-
-					InsertTailList( &AllProcessIoList, &pProcessNetWorkTrafficInfo->ListEntry );
-
-					pListEntry = pListEntry->Flink;
-				}
-
-				KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl KeReleaseSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
-
-				if( IsListEmpty( &AllProcessIoList ) )
-				{
-					break;
-				}
-
-				for( ; ; )
-				{
-					pListEntry = AllProcessIoList.Flink;
-
-					if( pListEntry == &AllProcessIoList )
-					{
-						break;
-					}
-
-					RemoveEntryList( pListEntry );
-
-					pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )CONTAINING_RECORD( pListEntry, PROCESS_NETWORK_TRAFFIC, ListEntry );
-
-					pIrp = DequeueIrp( &pProcessNetWorkTrafficInfo->IrpList, &pProcessNetWorkTrafficInfo->IrpListLock );
-
-					if( NULL == pIrp ) //If value is null, then reach the tail of the irp list.
-					{
-						continue;
-					}
-
-					pIrpSp = IoGetCurrentIrpStackLocation( pIrp );
-					pDeviceExtension = ( PTDI_FILTER_DEVICE_EXTENSION )pIrpSp->DeviceObject->DeviceExtension;
-
-					DebugPrintEx( SEND_SPEED_CONTROL_INFO, " ThreadSendingSpeedControl minor function is %d \n", pIrpSp->MinorFunction );
-
-					if( NULL == pIrp->AssociatedIrp.MasterIrp )
-					{
-						IoSetCancelRoutine( pIrp, NULL );
-
-						key.quad_part = make_hash_key( 0, ( DWORD )pIrp );
-						DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterCompletion del_hash_item 0x%0.8x \n", pIrp );
-                        
-						nRet = del_hash_item( &g_MasterIrpHash, key, NULL );
-						DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterCompletion del_hash_item 0x%0.8x return 0x%0.8x\n", pIrp, nRet );
-					}
-					IoSkipCurrentIrpStackLocation( pIrp );
-					IoCallDriver( pDeviceExtension->pTdiDeviceObject, pIrp );
-					ReleaseProcessNetWorkTrafficInfo( pProcessNetWorkTrafficInfo );
-				}
-
-				break;
-			}
-
-			if( TRUE == bWaitEvent )
-			{
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO,  "netmon ThreadSendingSpeedControl wait new irp\n" );
-				ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
-				KeWaitForSingleObject( &g_EventIrpListAdded, Executive, KernelMode, FALSE, &g_WaitNewIistItemTime );
-			}
-
-			if( 0 == dwConfiguredProcessIoInfoCount )
-			{
-				KeDelayExecutionThread( KernelMode, FALSE, &g_ThreadWaitConfigProcTime );
-			}
-
-			bWaitEvent = TRUE;
-			dwConfiguredProcessIoInfoCount = 0;
-
 			InitializeListHead( &AllProcessIoList );
-
-			DebugPrintEx( SEND_SPEED_CONTROL_INFO,  "netmon ThreadSendingSpeedControl KeAcquireSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
 			KeAcquireSpinLock( &g_SpLockProcessNetWorkTrafficInfo, &OldIrql );
-
+			
 			pListEntry = g_ProcessIoInfoList.Flink;
-
+			
 			for( ; ; )
 			{
 				if( pListEntry == &g_ProcessIoInfoList )
@@ -2585,11 +2459,6 @@ VOID ThreadSendingSpeedControl( PVOID pParam )
 				}
 
 				pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
-				if( pProcessNetWorkTrafficInfo->SendingSpeed.LowPart != 0xFFFFFFFF || 
-					pProcessNetWorkTrafficInfo->SendingSpeed.HighPart != 0x7FFFFFFF )
-				{
-					dwConfiguredProcessIoInfoCount ++; //Record the count of the send speed configured process.
-				}
 
 				InterlockedExchangeAdd( 
 					&pProcessNetWorkTrafficInfo->dwRefCount, 
@@ -2605,15 +2474,13 @@ VOID ThreadSendingSpeedControl( PVOID pParam )
 
 			if( IsListEmpty( &AllProcessIoList ) )
 			{
-				continue;
+				break;
 			}
 
 			for( ; ; )
 			{
-				PDEVICE_OBJECT pPdoDevice;
 				pListEntry = AllProcessIoList.Flink;
 
-				ASSERT( TRUE == MmIsAddressValid( pListEntry ) );
 				if( pListEntry == &AllProcessIoList )
 				{
 					break;
@@ -2627,734 +2494,913 @@ VOID ThreadSendingSpeedControl( PVOID pParam )
 
 				if( NULL == pIrp ) //If value is null, then reach the tail of the irp list.
 				{
-					DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl process: %d irp list is empty. \n", pProcessNetWorkTrafficInfo->dwProcessId );
-					goto RELEASE_PROCESS_IO_INFO_GET_NEXT;
+					continue;
 				}
 
-				bWaitEvent = FALSE;
-				dwIrpCount = pIrp->AssociatedIrp.IrpCount;
+				pIrpSp = IoGetCurrentIrpStackLocation( pIrp );
+				pDeviceExtension = ( PTDI_FILTER_DEVICE_EXTENSION )pIrpSp->DeviceObject->DeviceExtension;
 
-				KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
-				KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
-				KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
-				KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
-				KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
+				DebugPrintEx( SEND_SPEED_CONTROL_INFO, " ThreadSendingSpeedControl minor function is %d \n", pIrpSp->MinorFunction );
+
+				if( NULL == pIrp->AssociatedIrp.MasterIrp )
+				{
+					IoSetCancelRoutine( pIrp, NULL );
+
+					key.quad_part = make_hash_key( 0, ( DWORD )pIrp );
+					DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterCompletion del_hash_item 0x%0.8x \n", pIrp );
+                    
+					nRet = del_hash_item( &g_MasterIrpHash, key, NULL );
+					DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterCompletion del_hash_item 0x%0.8x return 0x%0.8x\n", pIrp, nRet );
+				}
+				IoSkipCurrentIrpStackLocation( pIrp );
+				IoCallDriver( pDeviceExtension->pTdiDeviceObject, pIrp );
+				ReleaseProcessNetWorkTrafficInfo( pProcessNetWorkTrafficInfo );
+			}
+
+			break;
+		}
+
+		if( TRUE == bWaitEvent )
+		{
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO,  "netmon ThreadSendingSpeedControl wait new irp\n" );
+			ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
+			KeWaitForSingleObject( &g_EventIrpListAdded, Executive, KernelMode, FALSE, &g_WaitNewIistItemTime );
+		}
+
+		if( 0 == dwConfiguredProcessIoInfoCount )
+		{
+			KeDelayExecutionThread( KernelMode, FALSE, &g_ThreadWaitConfigProcTime );
+		}
+
+		bWaitEvent = TRUE;
+		dwConfiguredProcessIoInfoCount = 0;
+
+		InitializeListHead( &AllProcessIoList );
+
+		DebugPrintEx( SEND_SPEED_CONTROL_INFO,  "netmon ThreadSendingSpeedControl KeAcquireSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
+		KeAcquireSpinLock( &g_SpLockProcessNetWorkTrafficInfo, &OldIrql );
+
+		pListEntry = g_ProcessIoInfoList.Flink;
+
+		for( ; ; )
+		{
+			if( pListEntry == &g_ProcessIoInfoList )
+			{
+				break;
+			}
+
+			pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
+			if( pProcessNetWorkTrafficInfo->SendingSpeed.LowPart != 0xFFFFFFFF || 
+				pProcessNetWorkTrafficInfo->SendingSpeed.HighPart != 0x7FFFFFFF )
+			{
+				dwConfiguredProcessIoInfoCount ++; //Record the count of the send speed configured process.
+			}
+
+			InterlockedExchangeAdd( 
+				&pProcessNetWorkTrafficInfo->dwRefCount, 
+				1 );
+
+			InsertTailList( &AllProcessIoList, &pProcessNetWorkTrafficInfo->ListEntry );
+
+			pListEntry = pListEntry->Flink;
+		}
+
+		KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
+		DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl KeReleaseSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
+
+		if( IsListEmpty( &AllProcessIoList ) )
+		{
+			continue;
+		}
+
+		for( ; ; )
+		{
+			PDEVICE_OBJECT pPdoDevice;
+			pListEntry = AllProcessIoList.Flink;
+
+			ASSERT( TRUE == MmIsAddressValid( pListEntry ) );
+			if( pListEntry == &AllProcessIoList )
+			{
+				break;
+			}
+
+			RemoveEntryList( pListEntry );
+
+			pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )CONTAINING_RECORD( pListEntry, PROCESS_NETWORK_TRAFFIC, ListEntry );
+
+			pIrp = DequeueIrp( &pProcessNetWorkTrafficInfo->IrpList, &pProcessNetWorkTrafficInfo->IrpListLock );
+
+			if( NULL == pIrp ) //If value is null, then reach the tail of the irp list.
+			{
+				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl process: %d irp list is empty. \n", pProcessNetWorkTrafficInfo->dwProcessId );
+				goto RELEASE_PROCESS_IO_INFO_GET_NEXT;
+			}
+
+			bWaitEvent = FALSE;
+			dwIrpCount = pIrp->AssociatedIrp.IrpCount;
+
+			KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
+			KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
+			KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
+			KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
+			KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
+
+			if( 0 == dwIrpCount )
+			{
+				pIrpSp = IoGetCurrentIrpStackLocation( pIrp );
+				pDeviceExtension = ( PTDI_FILTER_DEVICE_EXTENSION )pIrpSp->DeviceObject->DeviceExtension;
+				pPdoDevice = pDeviceExtension->pTdiDeviceObject;
+			}
+			else
+			{
+				pIrpSp = IoGetNextIrpStackLocation( pIrp );
+				pPdoDevice = pIrpSp->DeviceObject;
+				pDeviceExtension = NULL;
+			}
+
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl irp count is %d\n, pdo device is 0x%0.8x\n, Marjor func 0x%0.8x\n, Minor func 0x%0.8x\n, param1 0x%0.8x, param2 0x%0.8x \n", 
+				dwIrpCount, 
+				pPdoDevice, 
+				pIrpSp->MajorFunction, 
+				pIrpSp->MinorFunction, 
+				pIrpSp->Parameters.Others.Argument1, 
+				pIrpSp->Parameters.Others.Argument2 
+				);
+
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO, "ThreadSendingSpeedControl minor function is %d \n", pIrpSp->MinorFunction );
+
+			ASSERT( TDI_SEND == pIrpSp->MinorFunction || 
+				TDI_SEND_DATAGRAM == pIrpSp->MinorFunction );
+
+			if( TDI_SEND == pIrpSp->MinorFunction )
+			{
+				pTdiSendParam = ( PTDI_REQUEST_KERNEL_SEND )&pIrpSp->Parameters;
+				dwTransferLength = pTdiSendParam->SendLength;		
+			}
+			else
+			{
+				pTdiSendDGParam = ( PTDI_REQUEST_KERNEL_SENDDG )&pIrpSp->Parameters;
+				dwTransferLength = pTdiSendDGParam->SendLength;
+			}
+
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO, "pIrp->AssociatedIrp.SystemBuffer = 0x%0.8x, MinorFunction = %d \n", pIrp->AssociatedIrp.SystemBuffer, IoGetCurrentIrpStackLocation( pIrp )->MinorFunction );
+			
+			//Control speeding speed by depart sending length and make these to associated irps, so this original irp become the master irp.
+			if( dwTransferLength > pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
+			{
+				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl process: %d packet send length %d is greater than send speed limit %d \n", 
+					pProcessNetWorkTrafficInfo->dwProcessId, 
+					dwTransferLength, 
+					pProcessNetWorkTrafficInfo->SendingSpeed.LowPart );
 
 				if( 0 == dwIrpCount )
 				{
-					pIrpSp = IoGetCurrentIrpStackLocation( pIrp );
-					pDeviceExtension = ( PTDI_FILTER_DEVICE_EXTENSION )pIrpSp->DeviceObject->DeviceExtension;
-					pPdoDevice = pDeviceExtension->pTdiDeviceObject;
-				}
-				else
-				{
-					pIrpSp = IoGetNextIrpStackLocation( pIrp );
-					pPdoDevice = pIrpSp->DeviceObject;
-					pDeviceExtension = NULL;
-				}
+					DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl irp is master irp \n" );
 
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl irp count is %d\n, pdo device is 0x%0.8x\n, Marjor func 0x%0.8x\n, Minor func 0x%0.8x\n, param1 0x%0.8x, param2 0x%0.8x \n", 
-					dwIrpCount, 
-					pPdoDevice, 
-					pIrpSp->MajorFunction, 
-					pIrpSp->MinorFunction, 
-					pIrpSp->Parameters.Others.Argument1, 
-					pIrpSp->Parameters.Others.Argument2 
-					);
-
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "ThreadSendingSpeedControl minor function is %d \n", pIrpSp->MinorFunction );
-
-				ASSERT( TDI_SEND == pIrpSp->MinorFunction || 
-					TDI_SEND_DATAGRAM == pIrpSp->MinorFunction );
-
-				if( TDI_SEND == pIrpSp->MinorFunction )
-				{
-					pTdiSendParam = ( PTDI_REQUEST_KERNEL_SEND )&pIrpSp->Parameters;
-					dwTransferLength = pTdiSendParam->SendLength;		
-				}
-				else
-				{
-					pTdiSendDGParam = ( PTDI_REQUEST_KERNEL_SENDDG )&pIrpSp->Parameters;
-					dwTransferLength = pTdiSendDGParam->SendLength;
-				}
-
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "pIrp->AssociatedIrp.SystemBuffer = 0x%0.8x, MinorFunction = %d \n", pIrp->AssociatedIrp.SystemBuffer, IoGetCurrentIrpStackLocation( pIrp )->MinorFunction );
-				
-				//Control speeding speed by depart sending length and make these to associated irps, so this original irp become the master irp.
-				if( dwTransferLength > pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
-				{
-					DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl process: %d packet send length %d is greater than send speed limit %d \n", 
-						pProcessNetWorkTrafficInfo->dwProcessId, 
-						dwTransferLength, 
-						pProcessNetWorkTrafficInfo->SendingSpeed.LowPart );
-
-					if( 0 == dwIrpCount )
+					pMdl = pIrp->MdlAddress;
+					if( NULL == pMdl )
 					{
-						DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl irp is master irp \n" );
+						ASSERT( FALSE );
+						goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
+					}
 
-						pMdl = pIrp->MdlAddress;
-						if( NULL == pMdl )
-						{
-							ASSERT( FALSE );
-							goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
-						}
-
-						if( dwTransferLength != MmGetMdlByteCount( pMdl ) )
-						{
-							ASSERT( FALSE );
-							goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
-						}
+					if( dwTransferLength != MmGetMdlByteCount( pMdl ) )
+					{
+						ASSERT( FALSE );
+						goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
+					}
  
-						pIrpMdlVA = MmGetMdlVirtualAddress( pMdl );;
-						if( NULL == pIrpMdlVA )
+					pIrpMdlVA = MmGetMdlVirtualAddress( pMdl );;
+					if( NULL == pIrpMdlVA )
+					{
+						ASSERT( FALSE );
+						goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
+					}
+
+					dwTransferred = 0;
+
+					for( ; ; )
+					{
+						if( dwTransferred >= dwTransferLength )
 						{
-							ASSERT( FALSE );
-							goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
+							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl irp is departing done\n" );
+							goto RELEASE_PROCESS_IO_INFO_GET_NEXT;
 						}
 
-						dwTransferred = 0;
+						bAssocIrpMakeDone = FALSE;
+						dwIrpQueryLength = dwTransferLength - dwTransferred;
 
-						for( ; ; )
+						if( pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart < dwIrpQueryLength )
 						{
-							if( dwTransferred >= dwTransferLength )
-							{
-								DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl irp is departing done\n" );
-								goto RELEASE_PROCESS_IO_INFO_GET_NEXT;
-							}
+							//If sending speed is negative, then it limits the max data size of you departed fragment of the packet.
+							dwIrpQueryLength = pProcessNetWorkTrafficInfo->SendingSpeed.LowPart;
+							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl associated irp send length is %d \n", dwIrpQueryLength );
+							dwSendingSpeedHigh = pProcessNetWorkTrafficInfo->SendingSpeed.HighPart;
+						}
+						else
+						{
+							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl associated irp send length is %d, reach tail \n", dwIrpQueryLength );
+							dwSendingSpeedHigh = 0;
+						}
 
-							bAssocIrpMakeDone = FALSE;
-							dwIrpQueryLength = dwTransferLength - dwTransferred;
+						ASSERT( NULL != pDeviceExtension );
 
-							if( pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart < dwIrpQueryLength )
-							{
-								//If sending speed is negative, then it limits the max data size of you departed fragment of the packet.
-								dwIrpQueryLength = pProcessNetWorkTrafficInfo->SendingSpeed.LowPart;
-								DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl associated irp send length is %d \n", dwIrpQueryLength );
-								dwSendingSpeedHigh = pProcessNetWorkTrafficInfo->SendingSpeed.HighPart;
-							}
-							else
-							{
-								DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl associated irp send length is %d, reach tail \n", dwIrpQueryLength );
-								dwSendingSpeedHigh = 0;
-							}
+						pAssocIrp = IoMakeAssociatedIrp( 
+							pIrp, 
+							pDeviceExtension->pTdiDeviceObject->StackSize 
+							);
 
-							ASSERT( NULL != pDeviceExtension );
+						if( NULL == pAssocIrp )
+						{
+							goto RELEASE_ASSOCIATED_IRP;
+						}
 
-							pAssocIrp = IoMakeAssociatedIrp( 
-								pIrp, 
-								pDeviceExtension->pTdiDeviceObject->StackSize 
+						ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
+						DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl allocated associated irp 0x%0.8x\n", 
+							pAssocIrp );
+
+						pAllocMdl = IoAllocateMdl( 
+							pIrpMdlVA, 
+							dwTransferLength, 
+							FALSE, 
+							0, 
+							pAssocIrp 
+							);
+
+						if( NULL == pAllocMdl )
+						{
+							IoFreeIrp( pAssocIrp );
+							goto RELEASE_ASSOCIATED_IRP;
+						}
+
+						DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl allocated mdl 0x%0.8x\n", 
+							pAllocMdl );
+						
+						ASSERT( dwIrpQueryLength + dwTransferred <= dwTransferLength );
+
+						IoBuildPartialMdl( 
+							pIrp->MdlAddress, 
+							pAllocMdl, 
+							pIrpMdlVA - dwIrpQueryLength - dwTransferred + dwTransferLength, 
+							dwIrpQueryLength 
+							);
+
+						DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl partial mdl builded addr 0x%0.8x, length %d\n", 
+							pIrpMdlVA - dwIrpQueryLength - dwTransferred + dwTransferLength, 
+							dwIrpQueryLength );
+
+						dwTransferred += dwIrpQueryLength;
+
+						ASSERT( pAssocIrp->AssociatedIrp.MasterIrp == pIrp );
+
+						pAssocIrpSpNext = IoGetNextIrpStackLocation( pAssocIrp );
+
+						//This new associated irp do the same function of the original irp.
+						pAssocIrpSpNext->MajorFunction = pIrpSp->MajorFunction;
+						pAssocIrpSpNext->MinorFunction = pIrpSp->MinorFunction;
+						pAssocIrpSpNext->DeviceObject = pDeviceExtension->pTdiDeviceObject;
+						pAssocIrpSpNext->FileObject = pIrpSp->FileObject;
+
+						DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl set associating irp stack \n, Major func: %d\n Minor func: %d\n Device: 0x%0.8x\n, File object: 0x%0.8x \n", 
+							pAssocIrpSpNext->MajorFunction, 
+							pAssocIrpSpNext->MinorFunction, 
+							pAssocIrpSpNext->DeviceObject, 
+							pAssocIrpSpNext->FileObject 
+							);
+
+						if( TDI_SEND == pAssocIrpSpNext->MinorFunction )
+						{
+							PTDI_REQUEST_KERNEL_SEND pRequestSend;
+							pRequestSend = ( PTDI_REQUEST_KERNEL_SEND )&pAssocIrpSpNext->Parameters;
+
+							pRequestSend->SendFlags = pTdiSendParam->SendFlags;
+							pRequestSend->SendLength = dwIrpQueryLength;
+
+							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl set associating irp stack \n, send flag 0x%0.8x, send length %d \n", 
+								pRequestSend->SendFlags, 
+								pRequestSend->SendLength 
 								);
+						}
+						else
+						{
+							PTDI_REQUEST_KERNEL_SENDDG pRequestSendDG;
+							pRequestSendDG = ( PTDI_REQUEST_KERNEL_SENDDG )&pAssocIrpSpNext->Parameters;
 
-							if( NULL == pAssocIrp )
-							{
-								goto RELEASE_ASSOCIATED_IRP;
-							}
-
-							ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
-							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl allocated associated irp 0x%0.8x\n", 
-								pAssocIrp );
-
-							pAllocMdl = IoAllocateMdl( 
-								pIrpMdlVA, 
-								dwTransferLength, 
-								FALSE, 
-								0, 
-								pAssocIrp 
+							pRequestSendDG->SendDatagramInformation = pTdiSendDGParam->SendDatagramInformation;;
+							pRequestSendDG->SendLength = dwIrpQueryLength;
+							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl set associating irp stack \n, send datagram info 0x%0.8x, send length %d \n", 
+								pRequestSendDG->SendDatagramInformation, 
+								pRequestSendDG->SendLength 
 								);
+						}
 
-							if( NULL == pAllocMdl )
+						pAssocIrp->MdlAddress = pAllocMdl;
+						bAssocIrpMakeDone = TRUE;
+
+						DebugPrintEx( IRP_CANCEL_INFO, "netmon ThreadSendingSpeedControl MasterIrp 0x%0.8x Associated irp count is 0x%0.8x\n", 
+							pIrp, 
+							pIrp->AssociatedIrp.IrpCount );
+						InterlockedExchangeAdd( &pIrp->AssociatedIrp.IrpCount, 1 );
+
+						{	
+							KIRQL IrpSpIrql;
+							hash_key key;
+							PDRIVER_CANCEL OldCancelRoutine;
+
+							KeAcquireSpinLock( &pProcessNetWorkTrafficInfo->IrpListLock, &IrpSpIrql );
+							key.quad_part = make_hash_key( 0, ( DWORD )pAssocIrp );
+
+							DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterInternalIoControl add_hash_item 0x%0.8x \n", pIrp );
+							ntStatus = add_hash_item( &g_MasterIrpHash, key, ( hash_value )pProcessNetWorkTrafficInfo );
+							DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterInternalIoControl add_hash_item return 0x%0.8x \n", ntStatus );
+
+							IoMarkIrpPending( pAssocIrp );
+							OldCancelRoutine = IoSetCancelRoutine( pAssocIrp, TdiFilterCancel );
+							ASSERT( NULL == OldCancelRoutine );
+
+							InsertTailList( &pProcessNetWorkTrafficInfo->IrpList, &pAssocIrp->Tail.Overlay.ListEntry );
+
+							if( pIrp->Cancel )
 							{
-								IoFreeIrp( pAssocIrp );
-								goto RELEASE_ASSOCIATED_IRP;
-							}
-
-							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl allocated mdl 0x%0.8x\n", 
-								pAllocMdl );
-							
-							ASSERT( dwIrpQueryLength + dwTransferred <= dwTransferLength );
-
-							IoBuildPartialMdl( 
-								pIrp->MdlAddress, 
-								pAllocMdl, 
-								pIrpMdlVA - dwIrpQueryLength - dwTransferred + dwTransferLength, 
-								dwIrpQueryLength 
-								);
-
-							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl partial mdl builded addr 0x%0.8x, length %d\n", 
-								pIrpMdlVA - dwIrpQueryLength - dwTransferred + dwTransferLength, 
-								dwIrpQueryLength );
-
-							dwTransferred += dwIrpQueryLength;
-
-							ASSERT( pAssocIrp->AssociatedIrp.MasterIrp == pIrp );
-
-							pAssocIrpSpNext = IoGetNextIrpStackLocation( pAssocIrp );
-
-							//This new associated irp do the same function of the original irp.
-							pAssocIrpSpNext->MajorFunction = pIrpSp->MajorFunction;
-							pAssocIrpSpNext->MinorFunction = pIrpSp->MinorFunction;
-							pAssocIrpSpNext->DeviceObject = pDeviceExtension->pTdiDeviceObject;
-							pAssocIrpSpNext->FileObject = pIrpSp->FileObject;
-
-							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl set associating irp stack \n, Major func: %d\n Minor func: %d\n Device: 0x%0.8x\n, File object: 0x%0.8x \n", 
-								pAssocIrpSpNext->MajorFunction, 
-								pAssocIrpSpNext->MinorFunction, 
-								pAssocIrpSpNext->DeviceObject, 
-								pAssocIrpSpNext->FileObject 
-								);
-
-							if( TDI_SEND == pAssocIrpSpNext->MinorFunction )
-							{
-								PTDI_REQUEST_KERNEL_SEND pRequestSend;
-								pRequestSend = ( PTDI_REQUEST_KERNEL_SEND )&pAssocIrpSpNext->Parameters;
-
-								pRequestSend->SendFlags = pTdiSendParam->SendFlags;
-								pRequestSend->SendLength = dwIrpQueryLength;
-
-								DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl set associating irp stack \n, send flag 0x%0.8x, send length %d \n", 
-									pRequestSend->SendFlags, 
-									pRequestSend->SendLength 
-									);
-							}
-							else
-							{
-								PTDI_REQUEST_KERNEL_SENDDG pRequestSendDG;
-								pRequestSendDG = ( PTDI_REQUEST_KERNEL_SENDDG )&pAssocIrpSpNext->Parameters;
-
-								pRequestSendDG->SendDatagramInformation = pTdiSendDGParam->SendDatagramInformation;;
-								pRequestSendDG->SendLength = dwIrpQueryLength;
-								DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl set associating irp stack \n, send datagram info 0x%0.8x, send length %d \n", 
-									pRequestSendDG->SendDatagramInformation, 
-									pRequestSendDG->SendLength 
-									);
-							}
-
-							pAssocIrp->MdlAddress = pAllocMdl;
-							bAssocIrpMakeDone = TRUE;
-
-							DebugPrintEx( IRP_CANCEL_INFO, "netmon ThreadSendingSpeedControl MasterIrp 0x%0.8x Associated irp count is 0x%0.8x\n", 
-								pIrp, 
-								pIrp->AssociatedIrp.IrpCount );
-							InterlockedExchangeAdd( &pIrp->AssociatedIrp.IrpCount, 1 );
-
-							{	
-								KIRQL IrpSpIrql;
-								hash_key key;
-								PDRIVER_CANCEL OldCancelRoutine;
-
-								KeAcquireSpinLock( &pProcessNetWorkTrafficInfo->IrpListLock, &IrpSpIrql );
-								key.quad_part = make_hash_key( 0, ( DWORD )pAssocIrp );
-
-								DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterInternalIoControl add_hash_item 0x%0.8x \n", pIrp );
-								ntStatus = add_hash_item( &g_MasterIrpHash, key, ( hash_value )pProcessNetWorkTrafficInfo );
-								DebugPrintEx( IRP_CANCEL_INFO, "netmon TdiFilterInternalIoControl add_hash_item return 0x%0.8x \n", ntStatus );
-								//ASSERT( NT_SUCCESS( ntStatus ) );
-
-								IoMarkIrpPending( pAssocIrp );
-								OldCancelRoutine = IoSetCancelRoutine( pAssocIrp, TdiFilterCancel );
-								ASSERT( NULL == OldCancelRoutine );
-
-								InsertTailList( &pProcessNetWorkTrafficInfo->IrpList, &pAssocIrp->Tail.Overlay.ListEntry );
-
-								if( pIrp->Cancel )
+								OldCancelRoutine = IoSetCancelRoutine( pAssocIrp, NULL);
+								if( OldCancelRoutine )
 								{
-									OldCancelRoutine = IoSetCancelRoutine( pAssocIrp, NULL);
-									if( OldCancelRoutine )
-									{
-										RemoveEntryList( &pIrp->Tail.Overlay.ListEntry );
-										KeReleaseSpinLock( &pProcessNetWorkTrafficInfo->IrpListLock, IrpSpIrql );
-										pAssocIrp->IoStatus.Status = STATUS_CANCELLED; 
-										pAssocIrp->IoStatus.Information = 0;
-										IoCompleteRequest( pAssocIrp, IO_NO_INCREMENT );
-										continue;
-									}
+									RemoveEntryList( &pIrp->Tail.Overlay.ListEntry );
+									KeReleaseSpinLock( &pProcessNetWorkTrafficInfo->IrpListLock, IrpSpIrql );
+									pAssocIrp->IoStatus.Status = STATUS_CANCELLED; 
+									pAssocIrp->IoStatus.Information = 0;
+									IoCompleteRequest( pAssocIrp, IO_NO_INCREMENT );
+									continue;
 								}
-
-								KeReleaseSpinLock( &pProcessNetWorkTrafficInfo->IrpListLock, IrpSpIrql );
 							}
 
-							//delay this irp and its associated irps processing to next loop. 
-							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl associated irp inserted to process irp list \n" );
+							KeReleaseSpinLock( &pProcessNetWorkTrafficInfo->IrpListLock, IrpSpIrql );
+						}
+
+						//delay this irp and its associated irps processing to next loop. 
+						DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl associated irp inserted to process irp list \n" );
 
 RELEASE_ASSOCIATED_IRP:
-							if( FALSE == bAssocIrpMakeDone )
+						if( FALSE == bAssocIrpMakeDone )
+						{
+							//Release previous added associated irps.
+							for( ; ; )
 							{
-								//Release previous added associated irps.
+								DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl free associated irp %d \n", 
+									pIrp->AssociatedIrp.IrpCount );
+
+								if( 0 == pIrp->AssociatedIrp.IrpCount )
+								{
+									break;
+								}
+
+								pIrpListEntry = ExInterlockedRemoveHeadList( &pProcessNetWorkTrafficInfo->IrpList, 
+									&pProcessNetWorkTrafficInfo->IrpListLock );
+
+
+								DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl geted associated irp addr 0x%0.8x \n", 
+									pIrpListEntry );
+
+								if( NULL == pIrpListEntry )
+								{
+									ASSERT( FALSE );
+									InterlockedExchangeAdd( &pIrp->AssociatedIrp.IrpCount, -1 );
+									continue;
+								}
+
+								pIrpListed = CONTAINING_RECORD( pIrpListEntry, IRP, Tail.Overlay.ListEntry );
+								pMdl = pIrpListed->MdlAddress;
+
+								DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl geted mdl of associated irp 0x%0.8x \n", 
+									pMdl );
+
 								for( ; ; )
 								{
-									DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl free associated irp %d \n", 
-										pIrp->AssociatedIrp.IrpCount );
-
-									if( 0 == pIrp->AssociatedIrp.IrpCount )
+									if( NULL == pMdl )
 									{
 										break;
 									}
 
-									pIrpListEntry = ExInterlockedRemoveHeadList( &pProcessNetWorkTrafficInfo->IrpList, 
-										&pProcessNetWorkTrafficInfo->IrpListLock );
+									pMdlNext = pMdl->Next;
 
+									IoFreeMdl( pMdl );
+									pMdl = pMdlNext;
 
-									DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl geted associated irp addr 0x%0.8x \n", 
-										pIrpListEntry );
-
-									if( NULL == pIrpListEntry )
-									{
-										ASSERT( FALSE );
-										InterlockedExchangeAdd( &pIrp->AssociatedIrp.IrpCount, -1 );
-										continue;
-									}
-
-									pIrpListed = CONTAINING_RECORD( pIrpListEntry, IRP, Tail.Overlay.ListEntry );
-									pMdl = pIrpListed->MdlAddress;
-
-									DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl geted mdl of associated irp 0x%0.8x \n", 
+									DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl geted next mdl of associated irp 0x%0.8x \n", 
 										pMdl );
-
-									for( ; ; )
-									{
-										if( NULL == pMdl )
-										{
-											break;
-										}
-
-										pMdlNext = pMdl->Next;
-
-										IoFreeMdl( pMdl );
-										pMdl = pMdlNext;
-
-										DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl geted next mdl of associated irp 0x%0.8x \n", 
-											pMdl );
-									}
-
-									DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl free associated irp 0x%0.8x \n", 
-										pIrpListed );
-									IoFreeIrp( pIrpListed );
-									InterlockedExchangeAdd( &pIrp->AssociatedIrp.IrpCount, -1 );
 								}
 
-								goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
+								DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl free associated irp 0x%0.8x \n", 
+									pIrpListed );
+								IoFreeIrp( pIrpListed );
+								InterlockedExchangeAdd( &pIrp->AssociatedIrp.IrpCount, -1 );
 							}
+
+							goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
+						}
+
+						continue;
+					}
+				}
+			}
+
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl packet length lower than speed limit, or packet is associated irp \n" );
+
+			dwThreadWaitTime = 0;
+
+			//If sending speed is positive, then it limits the data size of one send time
+			for( ; ; )
+			{
+				if( pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart + dwTransferLength > pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
+				{
+					//Delay the sending function to longer time to match the seted sending speed.
+					if( dwTransferLength <= pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
+					{
+						KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
+						dwThreadWaitTime ++;
+						if( 5 > dwThreadWaitTime )
+						{
+							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl one second send length is over than speed length wait 10 milli-senconds \n" );
 
 							continue;
 						}
-					}
-				}
 
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl packet length lower than speed limit, or packet is associated irp \n" );
+						ExInterlockedInsertHeadList( &pProcessNetWorkTrafficInfo->IrpList, 
+							&pIrp->Tail.Overlay.ListEntry, 
+							&pProcessNetWorkTrafficInfo->IrpListLock );
 
-				dwThreadWaitTime = 0;
-
-				//If sending speed is positive, then it limits the data size of one send time
-				for( ; ; )
-				{
-					if( pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart + dwTransferLength > pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
-					{
-						//Delay the sending function to longer time to match the seted sending speed.
-						if( dwTransferLength <= pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart )
-						{
-							KeDelayExecutionThread( KernelMode, FALSE, &g_SendingDelayTime );
-							dwThreadWaitTime ++;
-							if( 5 > dwThreadWaitTime )
-							{
-								DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl one second send length is over than speed length wait 10 milli-senconds \n" );
-
-								continue;
-							}
-
-							ExInterlockedInsertHeadList( &pProcessNetWorkTrafficInfo->IrpList, 
-								&pIrp->Tail.Overlay.ListEntry, 
-								&pProcessNetWorkTrafficInfo->IrpListLock );
-
-							DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl waited 50 milli-seconds \n" );
-							goto RELEASE_PROCESS_IO_INFO_GET_NEXT;
-						}
-						else
-						{
-							break;
-						}
+						DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl waited 50 milli-seconds \n" );
+						goto RELEASE_PROCESS_IO_INFO_GET_NEXT;
 					}
 					else
 					{
 						break;
 					}
 				}
-
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl send speed is correct\n" );
-
-				bIrpContextNotAlloced = FALSE;
-				pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart += dwTransferLength;
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl new send length one second is %d\n", 
-					pProcessNetWorkTrafficInfo->SendedSizeOneSec.LowPart );
-
-				ASSERT( pIrpSp->MinorFunction == TDI_SEND || 
-					pIrpSp->MinorFunction == TDI_SEND_DATAGRAM );
-
-				if( 0 != dwIrpCount )
+				else
 				{
-					DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl irp is associated, master irp is 0x%0.8x \n", 
-						pIrp->AssociatedIrp.MasterIrp );
-
-					pCompletionWrap = ( PTDI_COMPLETION_WRAP )ExAllocateFromNPagedLookasideList( &g_CompletionWrapList );
-					if( NULL != pCompletionWrap )
-					{
-						pCompletionWrap->bSendOpera = TRUE;
-						pCompletionWrap->bWrap = FALSE;
-						pCompletionWrap->bAssocIrp = TRUE;
-						pCompletionWrap->pEProcess = pProcessNetWorkTrafficInfo->pEProcess;
-						pCompletionWrap->pProcessNetWorkTrafficInfo = pProcessNetWorkTrafficInfo;
-					}
-					else
-					{
-						bIrpContextNotAlloced = TRUE;
-					}
-
-					pIrpSp = IoGetNextIrpStackLocation( pIrp );
-					ASSERT( NULL != pIrpSp->DeviceObject );
-
-					if( FALSE == bIrpContextNotAlloced )
-					{
-						IoSetCompletionRoutine( pIrp, 
-							TdiFilterCompletion, 
-							pCompletionWrap, 
-							TRUE, 
-							TRUE, 
-							TRUE
-							);
-
-						DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl allocate completion wrap, call pdo 0x%0.8x driver \n", 
-							( pIrpSp - 1 )->DeviceObject ); 
-						
-						g_CompletionIrpCount ++;
-						DebugPrintEx( IRP_COMPLETION_INFO, "netmon TdiFilterSyncSendProcess  completion count++ %d\n", g_CompletionIrpCount );
-						IoCallDriver( pIrpSp->DeviceObject, pIrp );
-						ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
-					}
-					else
-					{
-						DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl can't allocate completion wrap, call pdo 0x%0.8x driver \n", 
-							( pIrpSp - 1 )->DeviceObject ); 
-
-						IoCallDriver( pIrpSp->DeviceObject, pIrp );
-					}
-					
-					goto RELEASE_PROCESS_IO_INFO_GET_NEXT;
+					break;
 				}
+			}
 
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl irp is not associated current stack location is %d\n", 
-					pIrp->CurrentLocation );
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl send speed is correct\n" );
 
-				if( 1 >= pIrp->CurrentLocation )
-				{
-					ASSERT( FALSE );
-					goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
-				}
+			bIrpContextNotAlloced = FALSE;
+			pProcessNetWorkTrafficInfo->SendedSizeOneSec.QuadPart += dwTransferLength;
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl new send length one second is %d\n", 
+				pProcessNetWorkTrafficInfo->SendedSizeOneSec.LowPart );
+
+			ASSERT( pIrpSp->MinorFunction == TDI_SEND || 
+				pIrpSp->MinorFunction == TDI_SEND_DATAGRAM );
+
+			if( 0 != dwIrpCount )
+			{
+				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl irp is associated, master irp is 0x%0.8x \n", 
+					pIrp->AssociatedIrp.MasterIrp );
 
 				pCompletionWrap = ( PTDI_COMPLETION_WRAP )ExAllocateFromNPagedLookasideList( &g_CompletionWrapList );
-
-				if( NULL == pCompletionWrap )
+				if( NULL != pCompletionWrap )
 				{
-					goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
+					pCompletionWrap->bSendOpera = TRUE;
+					pCompletionWrap->bWrap = FALSE;
+					pCompletionWrap->bAssocIrp = TRUE;
+					pCompletionWrap->pEProcess = pProcessNetWorkTrafficInfo->pEProcess;
+					pCompletionWrap->pProcessNetWorkTrafficInfo = pProcessNetWorkTrafficInfo;
+				}
+				else
+				{
+					bIrpContextNotAlloced = TRUE;
 				}
 
-				pCompletionWrap->bSendOpera = TRUE;
-				pCompletionWrap->bWrap = FALSE;
-				pCompletionWrap->bAssocIrp = FALSE;
-				pCompletionWrap->pEProcess = pProcessNetWorkTrafficInfo->pEProcess;
-				pCompletionWrap->pProcessNetWorkTrafficInfo = pProcessNetWorkTrafficInfo;
+				pIrpSp = IoGetNextIrpStackLocation( pIrp );
+				ASSERT( NULL != pIrpSp->DeviceObject );
 
-				IoCopyCurrentIrpStackLocationToNext( pIrp );
+				if( FALSE == bIrpContextNotAlloced )
+				{
+					IoSetCompletionRoutine( pIrp, 
+						TdiFilterCompletion, 
+						pCompletionWrap, 
+						TRUE, 
+						TRUE, 
+						TRUE
+						);
 
-				IoSetCompletionRoutine( pIrp, 
-					TdiFilterCompletion, 
-					pCompletionWrap, 
-					TRUE, 
-					TRUE, 
-					TRUE
-					);
+					DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl allocate completion wrap, call pdo 0x%0.8x driver \n", 
+						( pIrpSp - 1 )->DeviceObject ); 
+					
+					g_CompletionIrpCount ++;
+					DebugPrintEx( IRP_COMPLETION_INFO, "netmon TdiFilterSyncSendProcess  completion count++ %d\n", g_CompletionIrpCount );
+					IoCallDriver( pIrpSp->DeviceObject, pIrp );
+					ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
+				}
+				else
+				{
+					DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl can't allocate completion wrap, call pdo 0x%0.8x driver \n", 
+						( pIrpSp - 1 )->DeviceObject ); 
 
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl add completion wrap, call pdo deivce 0x%0.8x driver\n", 
-					pDeviceExtension->pTdiDeviceObject );
-
-				IoSetCancelRoutine( pIrp, NULL );
-
-				key.quad_part = make_hash_key( 0, ( DWORD )pIrp );
-				DebugPrintEx( IRP_CANCEL_INFO, "netmon ThreadSendingSpeedControl del_hash_item 0x%0.8x \n", pIrp );
-
-				nRet = del_hash_item( &g_MasterIrpHash, key, NULL );
-				DebugPrintEx( IRP_CANCEL_INFO, "netmon ThreadSendingSpeedControl del_hash_item 0x%0.8x return 0x%0.8x\n", pIrp, nRet );
-
-				g_CompletionIrpCount ++;
-				DebugPrintEx( IRP_COMPLETION_INFO, "netmon ThreadSendingSpeedControl  completion count++ %d\n", g_CompletionIrpCount );
-				IoCallDriver( pDeviceExtension->pTdiDeviceObject, pIrp );
-				ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
+					IoCallDriver( pIrpSp->DeviceObject, pIrp );
+				}
+				
 				goto RELEASE_PROCESS_IO_INFO_GET_NEXT;
+			}
+
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl irp is not associated current stack location is %d\n", 
+				pIrp->CurrentLocation );
+
+			if( 1 >= pIrp->CurrentLocation )
+			{
+				ASSERT( FALSE );
+				goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
+			}
+
+			pCompletionWrap = ( PTDI_COMPLETION_WRAP )ExAllocateFromNPagedLookasideList( &g_CompletionWrapList );
+
+			if( NULL == pCompletionWrap )
+			{
+				goto SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC;
+			}
+
+			pCompletionWrap->bSendOpera = TRUE;
+			pCompletionWrap->bWrap = FALSE;
+			pCompletionWrap->bAssocIrp = FALSE;
+			pCompletionWrap->pEProcess = pProcessNetWorkTrafficInfo->pEProcess;
+			pCompletionWrap->pProcessNetWorkTrafficInfo = pProcessNetWorkTrafficInfo;
+
+			IoCopyCurrentIrpStackLocationToNext( pIrp );
+
+			IoSetCompletionRoutine( pIrp, 
+				TdiFilterCompletion, 
+				pCompletionWrap, 
+				TRUE, 
+				TRUE, 
+				TRUE
+				);
+
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl add completion wrap, call pdo deivce 0x%0.8x driver\n", 
+				pDeviceExtension->pTdiDeviceObject );
+
+			IoSetCancelRoutine( pIrp, NULL );
+
+			key.quad_part = make_hash_key( 0, ( DWORD )pIrp );
+			DebugPrintEx( IRP_CANCEL_INFO, "netmon ThreadSendingSpeedControl del_hash_item 0x%0.8x \n", pIrp );
+
+			nRet = del_hash_item( &g_MasterIrpHash, key, NULL );
+			DebugPrintEx( IRP_CANCEL_INFO, "netmon ThreadSendingSpeedControl del_hash_item 0x%0.8x return 0x%0.8x\n", pIrp, nRet );
+
+			g_CompletionIrpCount ++;
+			DebugPrintEx( IRP_COMPLETION_INFO, "netmon ThreadSendingSpeedControl  completion count++ %d\n", g_CompletionIrpCount );
+			IoCallDriver( pDeviceExtension->pTdiDeviceObject, pIrp );
+			ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
+			goto RELEASE_PROCESS_IO_INFO_GET_NEXT;
 
 SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC:
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC\n"  );
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl SKIP_CURRENT_STACK_LOCATION_RELEASE_PROCESS_NETWORK_TRAFFIC_GET_NEXT_PROCESS_NETWORK_TRAFFIC\n"  );
 
-				IoSkipCurrentIrpStackLocation( pIrp );
-				IoCallDriver( pDeviceExtension->pTdiDeviceObject, pIrp );
+			IoSkipCurrentIrpStackLocation( pIrp );
+			IoCallDriver( pDeviceExtension->pTdiDeviceObject, pIrp );
 
 RELEASE_PROCESS_IO_INFO_GET_NEXT:
 
-				DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl RELEASE_PROCESS_IO_INFO_GET_NEXT\n"  );
-				ReleaseProcessNetWorkTrafficInfo( pProcessNetWorkTrafficInfo );
-				continue;
-			}
-		}
-
-		PsTerminateSystemThread( STATUS_SUCCESS );
-}
-
-VOID ThreadUpdateProcessIoState( PVOID pParam )
-{
-	NTSTATUS ntStatus;
-	DWORD dwProcessInfoLength;
-	PUNICODE_STRING ProcessImageName;
-	PSYSTEM_PROCESSES pSystemProcesses;
-	PPROCESS_INFORMATION_RECORD pProcessInformation;
-	PPROCESS_INFORMATION_LIST_ENTRY pProcessInfoListEntry;
-	PPROCESS_NETWORK_TRAFFIC pProcessNetWorkTrafficInfo;
-	DWORD dwProcessId;
-	PSYSTEM_PROCESSES pSystemProcess;
-	BYTE OldIrql;
-	PLIST_ENTRY pListEntry;
-	UNICODE_STRING ProcessImageFilePath;
-	CHAR bProcessInfoFinded;
-	LARGE_INTEGER SendingSpeed;
-	BOOL bStopRecv;
-	BOOL bStopSend;
-
-	ProcessImageName = NULL;
-	pSystemProcesses = NULL;
-
-	for( ; ; )
-	{
-		DebugPrintEx( PROCESS_COMMON_INFO,  "netmon ThreadUpdateProcessIoState wait new process\n" );
-		//KdBreakPoint();
-		if( TRUE == g_bThreadUpdateConfigStop )
-		{
-			break;
-		};
-
-		ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
-		KeWaitForSingleObject( &g_EventProcessInformationAdded, Executive, KernelMode, FALSE, NULL ); //Waiting util process control information or process netword record added, deleted.
-
-		for( ; ; )
-		{
-			ntStatus = ZwQuerySystemInformation( 
-				SystemProcessInformation, 
-				NULL, 
-				0, 
-				&dwProcessInfoLength 
-				);
-
-			if( STATUS_INFO_LENGTH_MISMATCH != ntStatus )
-			{
-				break;
-			}
-
-			if( NULL != pSystemProcesses )
-			{
-				ExFreePoolWithTag( pSystemProcesses, 0 );
-			}
-
-			pSystemProcesses = AllocZeroPoolWithTag( NonPagedPool, dwProcessInfoLength );
-			if( NULL == pSystemProcesses )
-			{
-				ntStatus = STATUS_INSUFFICIENT_RESOURCES;
-				break;
-			}
-
-			ntStatus = ZwQuerySystemInformation( SystemProcessInformation, 
-				pSystemProcesses, 
-				dwProcessInfoLength, 
-				&dwProcessInfoLength );
-
-			if( STATUS_INFO_LENGTH_MISMATCH != ntStatus )
-			{
-				break;
-			}
-		}
-
-RELEASE_SYSTEM_PROCESSES_BUFF_WAIT_NEXT_PROCESS:
-		if( !NT_SUCCESS( ntStatus ) )
-		{
-			if( NULL != pSystemProcesses )
-			{
-				ExFreePoolWithTag( pSystemProcesses, 0 );
-				pSystemProcesses = NULL;
-			}
+			DebugPrintEx( SEND_SPEED_CONTROL_INFO, "netmon ThreadSendingSpeedControl RELEASE_PROCESS_IO_INFO_GET_NEXT\n"  );
+			ReleaseProcessNetWorkTrafficInfo( pProcessNetWorkTrafficInfo );
 			continue;
 		}
-
-		if( NULL == ProcessImageName )
-		{
-			ProcessImageName = AllocZeroPoolWithTag( 
-				NonPagedPool, 
-				PROCESS_IMAGE_FILE_PATH_INFO_MAX_LENGTH 
-				);
-			if( NULL == ProcessImageName )
-			{
-				goto RELEASE_SYSTEM_PROCESSES_BUFF_WAIT_NEXT_PROCESS;
-			}
-		}
-
-		pSystemProcess = pSystemProcesses;
-
-		for( ; ; )
-		{
-			dwProcessId = pSystemProcess->ProcessId;
-
-			if( dwProcessId == SYSTEM_IDLE_PROCESS_ID || 
-				dwProcessId == SYSTEM_SYSTEM_PROCESS_ID )
-			{
-				goto LOCATE_NEXT_SYSTEM_PROCESS;
-			}
-
-			RtlZeroMemory( ProcessImageName, PROCESS_IMAGE_FILE_PATH_INFO_MAX_LENGTH );
-
-			ntStatus = GetProcessImagePath( 
-				pSystemProcess->ProcessId, 
-				ProcessImageName, 
-				PROCESS_IMAGE_FILE_PATH_INFO_MAX_LENGTH 
-				);
-
-			if( !NT_SUCCESS( ntStatus ) )
-			{
-				goto LOCATE_NEXT_SYSTEM_PROCESS;
-			}
-
-			bProcessInfoFinded = FALSE;
-
-			KeEnterCriticalRegion();
-			ExAcquireResourceExclusive( &g_SyncResource, TRUE );
-
-			pListEntry = g_ProcessInformationList.Flink;
-
-			for( ; ; )
-			{
-				if( pListEntry == &g_ProcessInformationList )
-				{
-					break;
-				}
-
-				pProcessInfoListEntry = ( PPROCESS_INFORMATION_LIST_ENTRY )pListEntry;
-				pProcessInformation = pProcessInfoListEntry->pProcessInformation;
-
-				RtlInitUnicodeString( &ProcessImageFilePath, pProcessInformation->szNativeImageFileName );
-
-				if( TRUE == RtlEqualUnicodeString( 
-					&ProcessImageFilePath, 
-					ProcessImageName, 
-					TRUE
-					) )
-				{
-					SendingSpeed.QuadPart = pProcessInformation->SendingSpeed.QuadPart;
-					bStopRecv = pProcessInformation->bStopRecv;
-					bStopSend = pProcessInformation->bStopSend;
-
-					bProcessInfoFinded = TRUE;
-					break;						
-				}
-
-				pListEntry = pListEntry->Flink;
-			}
-
-			ExReleaseResource( &g_SyncResource );
-			KeLeaveCriticalRegion();
-
-			DebugPrintEx( PROCESS_COMMON_INFO, "netmon ThreadUpdateProcessIoState KeAcquireSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
-			KeAcquireSpinLock( &g_SpLockProcessNetWorkTrafficInfo, &OldIrql );
-
-			pListEntry = g_ProcessIoInfoList.Flink;
-
-			for( ; ; )
-			{
-				if( pListEntry == &g_ProcessIoInfoList )
-				{
-					break;
-				}
-
-				pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
-
-				if( pProcessNetWorkTrafficInfo->dwProcessId == pSystemProcess->ProcessId )
-				{
-					LARGE_INTEGER InitializeValue;
-
-					if( TRUE == bProcessInfoFinded )
-					{
-	
-						pProcessNetWorkTrafficInfo->bStopRecv = bStopRecv;
-						pProcessNetWorkTrafficInfo->bStopSend = bStopSend;
-
-						if( 0 == SendingSpeed.QuadPart )
-						{
-							InitializeValue.LowPart = 0xFFFFFFFF;
-							InitializeValue.HighPart = 0x7FFFFFFF;
-						}
-						else
-						{
-							InitializeValue.QuadPart = SendingSpeed.QuadPart;
-						}
-
-						INTERLOCKED_COMPARE_EXCHANGE64( &pProcessNetWorkTrafficInfo->SendingSpeed, InitializeValue );
-					}
-					else
-					{
-
-						pProcessNetWorkTrafficInfo->bStopRecv = FALSE;
-						pProcessNetWorkTrafficInfo->bStopSend = FALSE;
-
-						InitializeValue.LowPart = 0xFFFFFFFF;
-						InitializeValue.HighPart = 0x7FFFFFFF;
-
-						INTERLOCKED_COMPARE_EXCHANGE64( &pProcessNetWorkTrafficInfo->SendingSpeed, InitializeValue );
-					}
-
-					break; //Only one process control information and one process network traffic record match one process.
-				}
-				pListEntry = pListEntry->Flink;
-			}
-
-			KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
-			DebugPrintEx( PROCESS_COMMON_INFO, "netmon ThreadUpdateProcessIoState KeReleaseSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
-
-LOCATE_NEXT_SYSTEM_PROCESS:
-			if( 0 == pSystemProcess->NextEntryDelta )
-			{
-				break;
-			}
-			pSystemProcess = ( PSYSTEM_PROCESSES )( ( PBYTE )pSystemProcess + pSystemProcess->NextEntryDelta );
-			ASSERT( TRUE == MmIsAddressValid( pSystemProcess ) );
-		} // foreach system process.
-	}
-
-	if( NULL != ProcessImageName )
-	{
-		ExFreePoolWithTag( ProcessImageName, 0 );
-	}
-
-	if( NULL != pSystemProcesses )
-	{
-		ExFreePoolWithTag( pSystemProcesses, 0 );
 	}
 
 	PsTerminateSystemThread( STATUS_SUCCESS );
 }
 
-VOID TimerDpcProcess( PKDPC pDpc, PVOID pEProcess, PVOID SystemArgument1 , PVOID SystemArgument2 )
+VOIDreadUpdateProcessIoState( PVOID pParam )
 {
-	PLIST_ENTRY pListEntry;
-	PPROCESS_NETWORK_TRAFFIC pProcessNetWorkTrafficInfo;
-	LARGE_INTEGER UpdatedValue;
+	TATUS ntStatus;
+	RD dwProcessInfoLength;
+	ICODE_STRING ProcessImageName;
+	STEM_PROCESSES pSystemProcesses;
+	OCESS_INFORMATION_RECORD pProcessInformation;
+	OCESS_INFORMATION_LIST_ENTRY pProcessInfoListEntry;
+	OCESS_NETWORK_TRAFFIC pProcessNetWorkTrafficInfo;
+	RD dwProcessId;
+	STEM_PROCESSES pSystemProcess;
+	E OldIrql;
+	ST_ENTRY pListEntry;
+	CODE_STRING ProcessImageFilePath;
+	R bProcessInfoFinded;
+	GE_INTEGER SendingSpeed;
+	L bStopRecv;
+	L bStopSend;
 
-	DebugPrintEx( TIMER_DPC_INFO, "Enter netmon TimerDpcProcess" );
+	cessImageName = NULL;
+	stemProcesses = NULL;
 
-	KeAcquireSpinLockAtDpcLevel( &g_SpLockProcessNetWorkTrafficInfo );
+	( ; ; )
+	
+	DebugPrintEx( PROCESS_COMMON_INFO,  "netmon ThreadUpdateProcessIoState wait new process\n" );
+	if( TRUE == g_bThreadUpdateConfigStop )
+	{
+		break;
+	};
+
+	ASSERT( KeGetCurrentIrql() <= DISPATCH_LEVEL );
+	KeWaitForSingleObject( &g_EventProcessInformationAdded, Executive, KernelMode, FALSE, NULL ); //Waiting util process control information or process netword record added, deleted.
+
+	for( ; ; )
+	{
+		ntStatus = ZwQuerySystemInformation( 
+			SystemProcessInformation, 
+			NULL, 
+			0, 
+			&dwProcessInfoLength 
+			);
+
+		if( STATUS_INFO_LENGTH_MISMATCH != ntStatus )
+		{
+			break;
+		}
+
+		if( NULL != pSystemProcesses )
+		{
+			ExFreePoolWithTag( pSystemProcesses, 0 );
+		}
+
+		pSystemProcesses = AllocZeroPoolWithTag( NonPagedPool, dwProcessInfoLength );
+		if( NULL == pSystemProcesses )
+		{
+			ntStatus = STATUS_INSUFFICIENT_RESOURCES;
+			break;
+		}
+
+		ntStatus = ZwQuerySystemInformation( SystemProcessInformation, 
+			pSystemProcesses, 
+			dwProcessInfoLength, 
+			&dwProcessInfoLength );
+
+		if( STATUS_INFO_LENGTH_MISMATCH != ntStatus )
+		{
+			break;
+		}
+	}
+
+RELE_SYSTEM_PROCESSES_BUFF_WAIT_NEXT_PROCESS:
+	if( !NT_SUCCESS( ntStatus ) )
+	{
+		if( NULL != pSystemProcesses )
+		{
+			ExFreePoolWithTag( pSystemProcesses, 0 );
+			pSystemProcesses = NULL;
+		}
+		continue;
+	}
+
+	if( NULL == ProcessImageName )
+	{
+		ProcessImageName = AllocZeroPoolWithTag( 
+			NonPagedPool, 
+			PROCESS_IMAGE_FILE_PATH_INFO_MAX_LENGTH 
+			);
+		if( NULL == ProcessImageName )
+		{
+			goto RELEASE_SYSTEM_PROCESSES_BUFF_WAIT_NEXT_PROCESS;
+		}
+	}
+
+	pSystemProcess = pSystemProcesses;
+
+	for( ; ; )
+	{
+		dwProcessId = pSystemProcess->ProcessId;
+
+		if( dwProcessId == SYSTEM_IDLE_PROCESS_ID || 
+			dwProcessId == SYSTEM_SYSTEM_PROCESS_ID )
+		{
+			goto LOCATE_NEXT_SYSTEM_PROCESS;
+		}
+
+		RtlZeroMemory( ProcessImageName, PROCESS_IMAGE_FILE_PATH_INFO_MAX_LENGTH );
+
+		ntStatus = GetProcessImagePath( 
+			pSystemProcess->ProcessId, 
+			ProcessImageName, 
+			PROCESS_IMAGE_FILE_PATH_INFO_MAX_LENGTH 
+			);
+
+		if( !NT_SUCCESS( ntStatus ) )
+		{
+			goto LOCATE_NEXT_SYSTEM_PROCESS;
+		}
+
+		bProcessInfoFinded = FALSE;
+
+		KeEnterCriticalRegion();
+		ExAcquireResourceExclusive( &g_SyncResource, TRUE );
+
+		pListEntry = g_ProcessInformationList.Flink;
+
+		for( ; ; )
+		{
+			if( pListEntry == &g_ProcessInformationList )
+			{
+				break;
+			}
+
+			pProcessInfoListEntry = ( PPROCESS_INFORMATION_LIST_ENTRY )pListEntry;
+			pProcessInformation = pProcessInfoListEntry->pProcessInformation;
+
+			RtlInitUnicodeString( &ProcessImageFilePath, pProcessInformation->szNativeImageFileName );
+
+			if( TRUE == RtlEqualUnicodeString( 
+				&ProcessImageFilePath, 
+				ProcessImageName, 
+				TRUE
+				) )
+			{
+				SendingSpeed.QuadPart = pProcessInformation->SendingSpeed.QuadPart;
+				bStopRecv = pProcessInformation->bStopRecv;
+				bStopSend = pProcessInformation->bStopSend;
+
+				bProcessInfoFinded = TRUE;
+				break;						
+			}
+
+			pListEntry = pListEntry->Flink;
+		}
+
+		ExReleaseResource( &g_SyncResource );
+		KeLeaveCriticalRegion();
+
+		DebugPrintEx( PROCESS_COMMON_INFO, "netmon ThreadUpdateProcessIoState KeAcquireSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
+		KeAcquireSpinLock( &g_SpLockProcessNetWorkTrafficInfo, &OldIrql );
+
+		pListEntry = g_ProcessIoInfoList.Flink;
+
+		for( ; ; )
+		{
+			if( pListEntry == &g_ProcessIoInfoList )
+			{
+				break;
+			}
+
+			pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
+
+			if( pProcessNetWorkTrafficInfo->dwProcessId == pSystemProcess->ProcessId )
+			{
+				LARGE_INTEGER InitializeValue;
+
+				if( TRUE == bProcessInfoFinded )
+				{
+
+					pProcessNetWorkTrafficInfo->bStopRecv = bStopRecv;
+					pProcessNetWorkTrafficInfo->bStopSend = bStopSend;
+
+					if( 0 == SendingSpeed.QuadPart )
+					{
+						InitializeValue.LowPart = 0xFFFFFFFF;
+						InitializeValue.HighPart = 0x7FFFFFFF;
+					}
+					else
+					{
+						InitializeValue.QuadPart = SendingSpeed.QuadPart;
+					}
+
+					INTERLOCKED_COMPARE_EXCHANGE64( &pProcessNetWorkTrafficInfo->SendingSpeed, InitializeValue );
+				}
+				else
+				{
+
+					pProcessNetWorkTrafficInfo->bStopRecv = FALSE;
+					pProcessNetWorkTrafficInfo->bStopSend = FALSE;
+
+					InitializeValue.LowPart = 0xFFFFFFFF;
+					InitializeValue.HighPart = 0x7FFFFFFF;
+
+					INTERLOCKED_COMPARE_EXCHANGE64( &pProcessNetWorkTrafficInfo->SendingSpeed, InitializeValue );
+				}
+
+				break; //Only one process control information and one process network traffic record match one process.
+			}
+			pListEntry = pListEntry->Flink;
+		}
+
+		KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
+		DebugPrintEx( PROCESS_COMMON_INFO, "netmon ThreadUpdateProcessIoState KeReleaseSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
+
+LOCANEXT_SYSTEM_PROCESS:
+		if( 0 == pSystemProcess->NextEntryDelta )
+		{
+			break;
+		}
+		pSystemProcess = ( PSYSTEM_PROCESSES )( ( PBYTE )pSystemProcess + pSystemProcess->NextEntryDelta );
+		ASSERT( TRUE == MmIsAddressValid( pSystemProcess ) );
+	} // foreach system process.
+	
+
+	 NULL != ProcessImageName )
+	
+	ExFreePoolWithTag( ProcessImageName, 0 );
+	
+
+	 NULL != pSystemProcesses )
+	
+	ExFreePoolWithTag( pSystemProcesses, 0 );
+	
+
+	erminateSystemThread( STATUS_SUCCESS );
+}
+
+VOIDmerDpcProcess( PKDPC pDpc, PVOID pEProcess, PVOID SystemArgument1 , PVOID SystemArgument2 )
+{
+	ST_ENTRY pListEntry;
+	OCESS_NETWORK_TRAFFIC pProcessNetWorkTrafficInfo;
+	GE_INTEGER UpdatedValue;
+
+	ugPrintEx( TIMER_DPC_INFO, "Enter netmon TimerDpcProcess" );
+
+	cquireSpinLockAtDpcLevel( &g_SpLockProcessNetWorkTrafficInfo );
+
+	stEntry = g_ProcessIoInfoList.Flink;
+
+	( ; ; )
+	
+	if( pListEntry == &g_ProcessIoInfoList )
+	{
+		break;
+	}
+
+	pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
+
+	if( pProcessNetWorkTrafficInfo->pEProcess == pEProcess )
+	{
+		InterlockedExchangeAdd( &pProcessNetWorkTrafficInfo->dwRefCount, 1 );
+		
+		UpdatedValue.QuadPart = 0;
+
+		INTERLOCKED_COMPARE_EXCHANGE64( 
+			&pProcessNetWorkTrafficInfo->SendedSizeOneSec, 
+			UpdatedValue 
+			);
+
+		if( pProcessNetWorkTrafficInfo->AllSuccSendedDataSize.QuadPart >= 
+			pProcessNetWorkTrafficInfo->AllSuccSendedDataSizePrev.QuadPart )
+		{
+			UpdatedValue.QuadPart = pProcessNetWorkTrafficInfo->AllSuccSendedDataSize.QuadPart - 
+				pProcessNetWorkTrafficInfo->AllSuccSendedDataSizePrev.QuadPart;
+
+			INTERLOCKED_COMPARE_EXCHANGE64( 
+				&pProcessNetWorkTrafficInfo->SuccSendedDataSizeOnce, 
+				UpdatedValue 
+				);
+		}
+
+		INTERLOCKED_COMPARE_EXCHANGE64( 
+			&pProcessNetWorkTrafficInfo->AllSuccSendedDataSizePrev, 
+			pProcessNetWorkTrafficInfo->AllSuccSendedDataSize 
+			);
+
+		if( pProcessNetWorkTrafficInfo->AllSuccRecvedDataSize.QuadPart >= 
+			pProcessNetWorkTrafficInfo->AllSuccRecvedDataSizePrev.QuadPart )
+		{
+			UpdatedValue.QuadPart = pProcessNetWorkTrafficInfo->AllSuccRecvedDataSize.QuadPart - 
+				pProcessNetWorkTrafficInfo->AllSuccRecvedDataSizePrev.QuadPart;
+
+			INTERLOCKED_COMPARE_EXCHANGE64( 
+				&pProcessNetWorkTrafficInfo->SuccRecvedDataSizeOnce, 
+				UpdatedValue 
+				);
+		}
+
+		INTERLOCKED_COMPARE_EXCHANGE64( 
+			&pProcessNetWorkTrafficInfo->AllSuccRecvedDataSizePrev, 
+			pProcessNetWorkTrafficInfo->AllSuccRecvedDataSize 
+			);
+
+		KeSetTimer( pProcessNetWorkTrafficInfo->pTimer, 
+			g_TimerElapse, 
+			pProcessNetWorkTrafficInfo->pDpc ); //Loop the timer
+
+		InterlockedExchangeAdd( &pProcessNetWorkTrafficInfo->dwRefCount, -1 );
+		break;
+	}
+	pListEntry = pListEntry->Flink;
+	
+
+	eleaseSpinLockFromDpcLevel( &g_SpLockProcessNetWorkTrafficInfo );
+
+	ugPrintEx( TIMER_DPC_INFO, "Leave netmon TimerDpcProcess" );
+}
+
+VOIDleteProcessIoInfo( DWORD dwParentId, DWORD dwProcessId, BOOL bCreate )
+{
+	QL OldIrql;
+	ST_ENTRY pListEntry;
+	OCESS_NETWORK_TRAFFIC pProcessNetWorkTrafficInfo;
+
+	ugPrintEx( PROCESS_COMMON_INFO, "netmon enter DeleteProcessIoInfo \n" );
+	( FALSE == bCreate )
+	
+	DebugPrintEx( PROCESS_COMMON_INFO, "netmon DeleteProcessIoInfo KeAcquireSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
+	KeAcquireSpinLock( &g_SpLockProcessNetWorkTrafficInfo, &OldIrql );
 
 	pListEntry = g_ProcessIoInfoList.Flink;
-
+	
 	for( ; ; )
 	{
 		if( pListEntry == &g_ProcessIoInfoList )
@@ -3363,186 +3409,98 @@ VOID TimerDpcProcess( PKDPC pDpc, PVOID pEProcess, PVOID SystemArgument1 , PVOID
 		}
 
 		pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
-
-		if( pProcessNetWorkTrafficInfo->pEProcess == pEProcess )
+		if ( pProcessNetWorkTrafficInfo->dwProcessId == dwProcessId )
 		{
-			InterlockedExchangeAdd( &pProcessNetWorkTrafficInfo->dwRefCount, 1 );
+			DWORD dwCurRefCount;
+
+			RemoveEntryList( pListEntry );
+
+			KeCancelTimer( pProcessNetWorkTrafficInfo->pTimer );
 			
-			UpdatedValue.QuadPart = 0;
-
-			INTERLOCKED_COMPARE_EXCHANGE64( 
-				&pProcessNetWorkTrafficInfo->SendedSizeOneSec, 
-				UpdatedValue 
-				);
-
-			if( pProcessNetWorkTrafficInfo->AllSuccSendedDataSize.QuadPart >= 
-				pProcessNetWorkTrafficInfo->AllSuccSendedDataSizePrev.QuadPart )
+			dwCurRefCount = InterlockedExchangeAdd( &pProcessNetWorkTrafficInfo->dwRefCount, -1 );
+			if ( 1 == dwCurRefCount )
 			{
-				UpdatedValue.QuadPart = pProcessNetWorkTrafficInfo->AllSuccSendedDataSize.QuadPart - 
-					pProcessNetWorkTrafficInfo->AllSuccSendedDataSizePrev.QuadPart;
-
-				INTERLOCKED_COMPARE_EXCHANGE64( 
-					&pProcessNetWorkTrafficInfo->SuccSendedDataSizeOnce, 
-					UpdatedValue 
-					);
+				ExFreePoolWithTag( pProcessNetWorkTrafficInfo->pDpc, 0 );
+				ExFreePoolWithTag( pProcessNetWorkTrafficInfo->pTimer, 0 );
+				ExFreePoolWithTag( pProcessNetWorkTrafficInfo, 0 );
 			}
-
-			INTERLOCKED_COMPARE_EXCHANGE64( 
-				&pProcessNetWorkTrafficInfo->AllSuccSendedDataSizePrev, 
-				pProcessNetWorkTrafficInfo->AllSuccSendedDataSize 
-				);
-
-			if( pProcessNetWorkTrafficInfo->AllSuccRecvedDataSize.QuadPart >= 
-				pProcessNetWorkTrafficInfo->AllSuccRecvedDataSizePrev.QuadPart )
+			else
 			{
-				UpdatedValue.QuadPart = pProcessNetWorkTrafficInfo->AllSuccRecvedDataSize.QuadPart - 
-					pProcessNetWorkTrafficInfo->AllSuccRecvedDataSizePrev.QuadPart;
-
-				INTERLOCKED_COMPARE_EXCHANGE64( 
-					&pProcessNetWorkTrafficInfo->SuccRecvedDataSizeOnce, 
-					UpdatedValue 
-					);
+				ASSERT( dwCurRefCount > 1 );
 			}
-
-			INTERLOCKED_COMPARE_EXCHANGE64( 
-				&pProcessNetWorkTrafficInfo->AllSuccRecvedDataSizePrev, 
-				pProcessNetWorkTrafficInfo->AllSuccRecvedDataSize 
-				);
-
-			KeSetTimer( pProcessNetWorkTrafficInfo->pTimer, 
-				g_TimerElapse, 
-				pProcessNetWorkTrafficInfo->pDpc ); //Loop the timer
-
-			InterlockedExchangeAdd( &pProcessNetWorkTrafficInfo->dwRefCount, -1 );
 			break;
 		}
+		
 		pListEntry = pListEntry->Flink;
 	}
 
-	KeReleaseSpinLockFromDpcLevel( &g_SpLockProcessNetWorkTrafficInfo );
+	KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
+	DebugPrintEx( PROCESS_COMMON_INFO, "netmon DeleteProcessIoInfo KeReleaseSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
+	
 
-	DebugPrintEx( TIMER_DPC_INFO, "Leave netmon TimerDpcProcess" );
+	ugPrintEx( PROCESS_COMMON_INFO, "netmon leave DeleteProcessIoInfo \n" );
 }
 
-VOID DeleteProcessIoInfo( DWORD dwParentId, DWORD dwProcessId, BOOL bCreate )
+NTSTS GetAllProcessesIoInformation( LPVOID *pOutput, DWORD dwInputBuffLength, DWORD *pAllInfoLength )
 {
-	KIRQL OldIrql;
-	PLIST_ENTRY pListEntry;
-	PPROCESS_NETWORK_TRAFFIC pProcessNetWorkTrafficInfo;
+	TATUS ntStatus;
+	QL OldIrql;
+	ST_ENTRY pListEntry;
+	RD dwCopiedLength;
+	OCESS_IO_INFO_OUTPUT pProcessIoInfoOutput;
+	OCESS_NETWORK_TRAFFIC pProcessNetWorkTrafficInfo;
 
-	DebugPrintEx( PROCESS_COMMON_INFO, "netmon enter DeleteProcessIoInfo \n" );
-	if ( FALSE == bCreate )
+	 NULL == pOutput ||
+	NULL == pAllInfoLength )
+	
+	return STATUS_INVALID_PARAMETER;
+	
+
+	cquireSpinLock( &g_SpLockProcessNetWorkTrafficInfo, &OldIrql );
+
+	ocessIoInfoOutput = ( PPROCESS_IO_INFO_OUTPUT )pOutput;
+
+	stEntry = g_ProcessIoInfoList.Blink;
+	opiedLength = 0;
+	tatus = STATUS_SUCCESS;
+
+	( ; ; )
+	
+	if( pListEntry == &g_ProcessIoInfoList )
 	{
-		DebugPrintEx( PROCESS_COMMON_INFO, "netmon DeleteProcessIoInfo KeAcquireSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
-		KeAcquireSpinLock( &g_SpLockProcessNetWorkTrafficInfo, &OldIrql );
-
-		pListEntry = g_ProcessIoInfoList.Flink;
-		
-		for( ; ; )
-		{
-			if( pListEntry == &g_ProcessIoInfoList )
-			{
-				break;
-			}
-
-			pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
-			if ( pProcessNetWorkTrafficInfo->dwProcessId == dwProcessId )
-			{
-				DWORD dwCurRefCount;
-
-				RemoveEntryList( pListEntry );
-
-				KeCancelTimer( pProcessNetWorkTrafficInfo->pTimer );
-				
-				dwCurRefCount = InterlockedExchangeAdd( &pProcessNetWorkTrafficInfo->dwRefCount, -1 );
-				if ( 1 == dwCurRefCount )
-				{
-					ExFreePoolWithTag( pProcessNetWorkTrafficInfo->pDpc, 0 );
-					ExFreePoolWithTag( pProcessNetWorkTrafficInfo->pTimer, 0 );
-					ExFreePoolWithTag( pProcessNetWorkTrafficInfo, 0 );
-				}
-				else
-				{
-					ASSERT( dwCurRefCount > 1 );
-				}
-				break;
-			}
-			
-			pListEntry = pListEntry->Flink;
-		}
-
-		KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
-		DebugPrintEx( PROCESS_COMMON_INFO, "netmon DeleteProcessIoInfo KeReleaseSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
+		break;
 	}
 
-	DebugPrintEx( PROCESS_COMMON_INFO, "netmon leave DeleteProcessIoInfo \n" );
-}
+	pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
 
-NTSTATUS GetAllProcessesIoInformation( LPVOID *pOutput, DWORD dwInputBuffLength, DWORD *pAllInfoLength )
-{
-	NTSTATUS ntStatus;
-	KIRQL OldIrql;
-	PLIST_ENTRY pListEntry;
-	DWORD dwCopiedLength;
-	PPROCESS_IO_INFO_OUTPUT pProcessIoInfoOutput;
-	PPROCESS_NETWORK_TRAFFIC pProcessNetWorkTrafficInfo;
-
-	if( dwBPFlag & BP_ON_GET_ALL_PROCESS_IO )
+	if ( dwCopiedLength + sizeof( PROCESS_IO_INFO_OUTPUT ) > dwInputBuffLength )
 	{
-		KdBreakPoint();
+		ntStatus = STATUS_BUFFER_TOO_SMALL;
+		*pAllInfoLength = 0;
+		break;
 	}
 
-	if( NULL == pOutput ||
-		NULL == pAllInfoLength )
-	{
-		return STATUS_INVALID_PARAMETER;
-	}
+	DebugPrintEx( OUTPUT_ALL_PROCESS_IO_INFO,  "netmon GetAllProcessesIoInformation  process id: %d \n",
+		pProcessNetWorkTrafficInfo->dwProcessId
+		);
 
-		KeAcquireSpinLock( &g_SpLockProcessNetWorkTrafficInfo, &OldIrql );
+	pProcessIoInfoOutput->dwProcessId = pProcessNetWorkTrafficInfo->dwProcessId;
+	pProcessIoInfoOutput->AllSuccSendedDataSize.QuadPart = pProcessNetWorkTrafficInfo->AllSuccSendedDataSize.QuadPart;
+	pProcessIoInfoOutput->AllSuccRecvedDataSize.QuadPart = pProcessNetWorkTrafficInfo->AllSuccRecvedDataSizePrev.QuadPart;
+	pProcessIoInfoOutput->bStopSend = pProcessNetWorkTrafficInfo->bStopSend;
+	pProcessIoInfoOutput->bStopRecv = pProcessNetWorkTrafficInfo->bStopRecv;
+	pProcessIoInfoOutput->SendingSpeed.QuadPart = pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart;
+	pProcessIoInfoOutput->SuccSendedDataSizeOnce.QuadPart = pProcessNetWorkTrafficInfo->SuccSendedDataSizeOnce.QuadPart;
+	pProcessIoInfoOutput->SuccRecvedDataSizeOnce.QuadPart = pProcessNetWorkTrafficInfo->SuccRecvedDataSizeOnce.QuadPart;
 
-		pProcessIoInfoOutput = ( PPROCESS_IO_INFO_OUTPUT )pOutput;
+	pProcessIoInfoOutput ++;
+	dwCopiedLength += sizeof( PROCESS_IO_INFO_OUTPUT );
 
-		pListEntry = g_ProcessIoInfoList.Blink;
-		dwCopiedLength = 0;
-		ntStatus = STATUS_SUCCESS;
+	pListEntry = pListEntry->Blink;
+	
 
-		for( ; ; )
-		{
-			if( pListEntry == &g_ProcessIoInfoList )
-			{
-				break;
-			}
-
-			pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
-
-			if ( dwCopiedLength + sizeof( PROCESS_IO_INFO_OUTPUT ) > dwInputBuffLength )
-			{
-				ntStatus = STATUS_BUFFER_TOO_SMALL;
-				*pAllInfoLength = 0;
-				break;
-			}
-
-			DebugPrintEx( OUTPUT_ALL_PROCESS_IO_INFO,  "netmon GetAllProcessesIoInformation  process id: %d \n",
-				pProcessNetWorkTrafficInfo->dwProcessId
-				);
-
-			pProcessIoInfoOutput->dwProcessId = pProcessNetWorkTrafficInfo->dwProcessId;
-			pProcessIoInfoOutput->AllSuccSendedDataSize.QuadPart = pProcessNetWorkTrafficInfo->AllSuccSendedDataSize.QuadPart;
-			pProcessIoInfoOutput->AllSuccRecvedDataSize.QuadPart = pProcessNetWorkTrafficInfo->AllSuccRecvedDataSizePrev.QuadPart;
-			pProcessIoInfoOutput->bStopSend = pProcessNetWorkTrafficInfo->bStopSend;
-			pProcessIoInfoOutput->bStopRecv = pProcessNetWorkTrafficInfo->bStopRecv;
-			pProcessIoInfoOutput->SendingSpeed.QuadPart = pProcessNetWorkTrafficInfo->SendingSpeed.QuadPart;
-			pProcessIoInfoOutput->SuccSendedDataSizeOnce.QuadPart = pProcessNetWorkTrafficInfo->SuccSendedDataSizeOnce.QuadPart;
-			pProcessIoInfoOutput->SuccRecvedDataSizeOnce.QuadPart = pProcessNetWorkTrafficInfo->SuccRecvedDataSizeOnce.QuadPart;
-
-			pProcessIoInfoOutput ++;
-			dwCopiedLength += sizeof( PROCESS_IO_INFO_OUTPUT );
-
-			pListEntry = pListEntry->Blink;
-		}
-
-		KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
-		*pAllInfoLength = dwCopiedLength;
+	eleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
+	llInfoLength = dwCopiedLength;
 	return ntStatus;
 }
 
@@ -3554,11 +3512,6 @@ NTSTATUS GetAllProcessesInformation( PPROCESS_INFORMATION_RECORD pAllProcessInfo
 	PPROCESS_INFORMATION_RECORD pProcessInformation;
 	DWORD dwListSize;
 	PPROCESS_INFORMATION_RECORD pPrcessInformationOutput;
-
-	if( dwBPFlag & BP_ON_GET_ALL_PROCESS_CONTROL )
-	{
-		KdBreakPoint();
-	}
 
 	if ( NULL == pAllProcessInfomation || 
 		0 == pAllInfoLength )
@@ -3573,48 +3526,48 @@ NTSTATUS GetAllProcessesInformation( PPROCESS_INFORMATION_RECORD pAllProcessInfo
 
 	dwListSize = 0;
 
-		for( pListEntry = g_ProcessInformationList.Flink; pListEntry != &g_ProcessInformationList; pListEntry = pListEntry->Flink )
+	for( pListEntry = g_ProcessInformationList.Flink; pListEntry != &g_ProcessInformationList; pListEntry = pListEntry->Flink )
+	{
+		dwListSize ++;
+	}
+
+	if( dwBufferLength < sizeof( PROCESS_INFORMATION_RECORD ) * dwListSize )
+	{
+		ntStatus = STATUS_BUFFER_TOO_SMALL;
+		goto RETURN_;
+	}
+
+	*pAllInfoLength = 0;
+	pPrcessInformationOutput = pAllProcessInfomation;
+
+	pListEntry = g_ProcessInformationList.Flink;
+
+	for( ; ; )
+	{
+		if( pListEntry == &g_ProcessInformationList )
 		{
-			dwListSize ++;
+			break;
 		}
 
-		if( dwBufferLength < sizeof( PROCESS_INFORMATION_RECORD ) * dwListSize )
-		{
-			ntStatus = STATUS_BUFFER_TOO_SMALL;
-			goto RETURN_;
-		}
+		pProcessInformationList = ( PPROCESS_INFORMATION_LIST_ENTRY )pListEntry;
+		pProcessInformation = pProcessInformationList->pProcessInformation;
 
-		*pAllInfoLength = 0;
-		pPrcessInformationOutput = pAllProcessInfomation;
+		DebugPrintEx( OUTPUT_ALL_PROCESS_CONTROL_INFO, "Get process control setting: \n, Remove %d, StopRecv %d, StopSend %d, SendingSpeed: %d \n ImagePath %ws \n", 
+			pProcessInformation->bRemove,
+			pProcessInformation->bStopRecv, 
+			pProcessInformation->bStopSend, 
+			pProcessInformation->SendingSpeed, 
+			pProcessInformation->szNativeImageFileName
+			);
 
-		pListEntry = g_ProcessInformationList.Flink;
+		RtlCopyMemory( pPrcessInformationOutput, pProcessInformationList->pProcessInformation, sizeof( PROCESS_INFORMATION_RECORD ) );
+		*pAllInfoLength += sizeof( PROCESS_INFORMATION_RECORD );
+		pPrcessInformationOutput ++;
 
-		for( ; ; )
-		{
-			if( pListEntry == &g_ProcessInformationList )
-			{
-				break;
-			}
+		pListEntry = pListEntry->Flink;
+	}
 
-			pProcessInformationList = ( PPROCESS_INFORMATION_LIST_ENTRY )pListEntry;
-			pProcessInformation = pProcessInformationList->pProcessInformation;
-
-			DebugPrintEx( OUTPUT_ALL_PROCESS_CONTROL_INFO, "Get process control setting: \n, Remove %d, StopRecv %d, StopSend %d, SendingSpeed: %d \n ImagePath %ws \n", 
-				pProcessInformation->bRemove,
-				pProcessInformation->bStopRecv, 
-				pProcessInformation->bStopSend, 
-				pProcessInformation->SendingSpeed, 
-				pProcessInformation->szNativeImageFileName
-				);
-
-			RtlCopyMemory( pPrcessInformationOutput, pProcessInformationList->pProcessInformation, sizeof( PROCESS_INFORMATION_RECORD ) );
-			*pAllInfoLength += sizeof( PROCESS_INFORMATION_RECORD );
-			pPrcessInformationOutput ++;
-
-			pListEntry = pListEntry->Flink;
-		}
-
-		ntStatus = STATUS_SUCCESS;
+	ntStatus = STATUS_SUCCESS;
 RETURN_:
 	ExReleaseResourceLite( &g_SyncResource );
 	KeLeaveCriticalRegion();
@@ -3622,7 +3575,6 @@ RETURN_:
 	return ntStatus;
 }
 
-#include <ntstatus.h>
 NTSTATUS ReleaseAllProcessesInformation()
 {
 	PPROCESS_INFORMATION_LIST_ENTRY pProcessInformationList;
@@ -3670,7 +3622,7 @@ NTSTATUS StartWorkThreadManageProcessInfo(
 	DWORD dwInputBufferLength 
 	)
 {
-	NTSTATUS ntStatus;
+	NTSTATUS ntStatus = STATUS_SUCCESS;
 	PPROCESS_INFORMATION_LIST_ENTRY pProcessInformationLink;
 	PPROCESS_INFORMATION_RECORD pProcessInformation;
 	HANDLE hSystemThread;
@@ -3678,127 +3630,108 @@ NTSTATUS StartWorkThreadManageProcessInfo(
 	UNICODE_STRING ProcessImageFilePath;
 	PLIST_ENTRY pListEntry;
 
-	ntStatus = STATUS_SUCCESS;
-
-	if( dwBPFlag & BP_ON_ADD_PROCESS_CONTROL )
+	DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon Entry StartWorkThreadManageProcessInfo input length is %d\n", dwInputBufferLength );
+	if( TRUE == InterlockedExchangeAdd( &g_bBeginStartThreads, 0 ) )
 	{
-		KdBreakPoint();
+		if( FALSE == InterlockedExchangeAdd( &g_bThreadsRunning, 0 ) )
+		{
+			return STATUS_UNSUCCESSFUL;
+		}
 	}
 
-	DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon Entry StartWorkThreadManageProcessInfo input length is %d\n", dwInputBufferLength );
-		if( TRUE == InterlockedExchangeAdd( &g_bBeginStartThreads, 0 ) )
+	if( NULL == pProcessInformationFind )
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	if( sizeof( PROCESS_INFORMATION_RECORD ) != dwInputBufferLength )
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	if( NULL == pProcessInformationFind->szNativeImageFileName )
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	if( L'\0' != pProcessInformationFind->szNativeImageFileName[ PROCESS_IMAGE_FILE_PATH_INFO_MAX_LENGTH - 1 ] )
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	if( FALSE == InterlockedExchangeAdd( &g_bBeginStartThreads, 0 ) )
+	{
+		InterlockedExchange( &g_bBeginStartThreads, TRUE );
+
+		DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon StartWorkThreadManageProcessInfo start ThreadUpdateProcessIoState \n" );
+
+		if( NULL == ThreadUpdateConfig )
 		{
-			if( FALSE == InterlockedExchangeAdd( &g_bThreadsRunning, 0 ) )
+			ntStatus = CreateWorkThread( ThreadUpdateProcessIoState, 
+				NULL, 
+				&ThreadUpdateConfig
+				);
+
+			if( !NT_SUCCESS( ntStatus ) )
 			{
-				return STATUS_UNSUCCESSFUL;
+				InterlockedExchange( &g_bBeginStartThreads, FALSE );
+				return ntStatus;
 			}
 		}
 
-		if( NULL == pProcessInformationFind )
+		DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon StartWorkThreadManageProcessInfo start ThreadSendingSpeedControl \n" );
+
+		if( NULL == ThreadProcessIrp )
 		{
-			return STATUS_INVALID_PARAMETER;
-		}
+			ntStatus = CreateWorkThread( ThreadSendingSpeedControl, 
+				NULL, 
+				&ThreadProcessIrp
+				);
 
-		if( sizeof( PROCESS_INFORMATION_RECORD ) != dwInputBufferLength )
-		{
-			return STATUS_INVALID_PARAMETER;
-		}
-
-		if( NULL == pProcessInformationFind->szNativeImageFileName )
-		{
-			return STATUS_INVALID_PARAMETER;
-		}
-
-		if( L'\0' != pProcessInformationFind->szNativeImageFileName[ PROCESS_IMAGE_FILE_PATH_INFO_MAX_LENGTH - 1 ] )
-		{
-			return STATUS_INVALID_PARAMETER;
-		}
-
-		if( FALSE == InterlockedExchangeAdd( &g_bBeginStartThreads, 0 ) )
-		{
-			InterlockedExchange( &g_bBeginStartThreads, TRUE );
-
-			DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon StartWorkThreadManageProcessInfo start ThreadUpdateProcessIoState \n" );
-
-			if( NULL == ThreadUpdateConfig )
+			if( !NT_SUCCESS( ntStatus ) )
 			{
-				ntStatus = CreateWorkThread( ThreadUpdateProcessIoState, 
-					NULL, 
-					&ThreadUpdateConfig
-					);
-
-				if( !NT_SUCCESS( ntStatus ) )
-				{
-					InterlockedExchange( &g_bBeginStartThreads, FALSE );
-					return ntStatus;
-				}
+				InterlockedExchange( &g_bBeginStartThreads, FALSE );
+				return ntStatus;
 			}
-
-			DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon StartWorkThreadManageProcessInfo start ThreadSendingSpeedControl \n" );
-
-			if( NULL == ThreadProcessIrp )
-			{
-				ntStatus = CreateWorkThread( ThreadSendingSpeedControl, 
-					NULL, 
-					&ThreadProcessIrp
-					);
-
-				if( !NT_SUCCESS( ntStatus ) )
-				{
-					InterlockedExchange( &g_bBeginStartThreads, FALSE );
-					return ntStatus;
-				}
-			}
-
-			InterlockedExchange( &g_bThreadsRunning, TRUE );
 		}
 
-		RtlInitUnicodeString( &ProcessImageFilePathFind, pProcessInformationFind->szNativeImageFileName );
-		
-		DebugPrintEx( PROCESS_START_THREAD_INFO, "netmon StartWorkThreadManageProcessInfo process information modifing  stop recv: %d, stop send %d, send speed: %d\n", 
-			pProcessInformationFind->bStopRecv, 
-			pProcessInformationFind->bStopSend, 
-			pProcessInformationFind->SendingSpeed.LowPart 
-			);
+		InterlockedExchange( &g_bThreadsRunning, TRUE );
+	}
 
-		KeEnterCriticalRegion();
-		ExAcquireResourceExclusive( &g_SyncResource, TRUE );
+	RtlInitUnicodeString( &ProcessImageFilePathFind, pProcessInformationFind->szNativeImageFileName );
+	
+	DebugPrintEx( PROCESS_START_THREAD_INFO, "netmon StartWorkThreadManageProcessInfo process information modifing  stop recv: %d, stop send %d, send speed: %d\n", 
+		pProcessInformationFind->bStopRecv, 
+		pProcessInformationFind->bStopSend, 
+		pProcessInformationFind->SendingSpeed.LowPart 
+		);
 
-		pListEntry = g_ProcessInformationList.Flink;
+	KeEnterCriticalRegion();
+	ExAcquireResourceExclusive( &g_SyncResource, TRUE );
 
-		for( ; ; )
+	pListEntry = g_ProcessInformationList.Flink;
+
+	for( ; ; )
+	{
+		if( pListEntry == &g_ProcessInformationList )
 		{
-			if( pListEntry == &g_ProcessInformationList )
+			break;
+		}
+
+		pProcessInformationLink = ( PPROCESS_INFORMATION_LIST_ENTRY )pListEntry;
+		pProcessInformation = pProcessInformationLink->pProcessInformation;
+		RtlInitUnicodeString( &ProcessImageFilePath, pProcessInformation->szNativeImageFileName );
+
+		DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon StartWorkThreadManageProcessInfo find process information find image path: %wZ, located image path: %wZ\n", 
+			&ProcessImageFilePathFind, 
+			&ProcessImageFilePath );
+
+		if( TRUE == RtlEqualUnicodeString( &ProcessImageFilePath, 
+			&ProcessImageFilePathFind, TRUE ) )
+		{
+			if( FALSE == pProcessInformationFind->bRemove )
 			{
-				break;
-			}
-
-			pProcessInformationLink = ( PPROCESS_INFORMATION_LIST_ENTRY )pListEntry;
-			pProcessInformation = pProcessInformationLink->pProcessInformation;
-			RtlInitUnicodeString( &ProcessImageFilePath, pProcessInformation->szNativeImageFileName );
-
-			DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon StartWorkThreadManageProcessInfo find process information find image path: %wZ, located image path: %wZ\n", 
-				&ProcessImageFilePathFind, 
-				&ProcessImageFilePath );
-
-			if( TRUE == RtlEqualUnicodeString( &ProcessImageFilePath, 
-				&ProcessImageFilePathFind, TRUE ) )
-			{
-				if( FALSE == pProcessInformationFind->bRemove )
-				{
-					RtlCopyMemory( pProcessInformation, pProcessInformationFind, sizeof( PROCESS_INFORMATION_RECORD ) );
-					KeSetEvent( &g_EventProcessInformationAdded, 0, FALSE );
-
-					ExReleaseResource( &g_SyncResource );
-					KeLeaveCriticalRegion();
-					return ntStatus;
-				}
-
-				RemoveEntryList( pListEntry );
-
-				ExFreePoolWithTag( pProcessInformation, 0 );
-				ExFreePoolWithTag( pProcessInformationLink, 0 );
-
+				RtlCopyMemory( pProcessInformation, pProcessInformationFind, sizeof( PROCESS_INFORMATION_RECORD ) );
 				KeSetEvent( &g_EventProcessInformationAdded, 0, FALSE );
 
 				ExReleaseResource( &g_SyncResource );
@@ -3806,51 +3739,63 @@ NTSTATUS StartWorkThreadManageProcessInfo(
 				return ntStatus;
 			}
 
-			pListEntry = pListEntry->Flink;
-		}
+			RemoveEntryList( pListEntry );
 
-		DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon StartWorkThreadManageProcessInfo process information not find \n" );
-		if( FALSE != pProcessInformationFind->bRemove )
-		{
+			ExFreePoolWithTag( pProcessInformation, 0 );
+			ExFreePoolWithTag( pProcessInformationLink, 0 );
+
+			KeSetEvent( &g_EventProcessInformationAdded, 0, FALSE );
+
 			ExReleaseResource( &g_SyncResource );
 			KeLeaveCriticalRegion();
 			return ntStatus;
 		}
 
-		pProcessInformationLink = ( PPROCESS_INFORMATION_LIST_ENTRY )AllocZeroPoolWithTag( PagedPool, sizeof( PROCESS_INFORMATION_LIST_ENTRY ) );
+		pListEntry = pListEntry->Flink;
+	}
 
-		if( NULL == pProcessInformationLink )
-		{
-			ExReleaseResource( &g_SyncResource );
-			KeLeaveCriticalRegion();
+	DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon StartWorkThreadManageProcessInfo process information not find \n" );
+	if( FALSE != pProcessInformationFind->bRemove )
+	{
+		ExReleaseResource( &g_SyncResource );
+		KeLeaveCriticalRegion();
+		return ntStatus;
+	}
 
-			return STATUS_INSUFFICIENT_RESOURCES;
-		}
+	pProcessInformationLink = ( PPROCESS_INFORMATION_LIST_ENTRY )AllocZeroPoolWithTag( PagedPool, sizeof( PROCESS_INFORMATION_LIST_ENTRY ) );
 
-		pProcessInformation = ( PPROCESS_INFORMATION_RECORD )AllocZeroPoolWithTag( PagedPool, sizeof( PROCESS_INFORMATION_RECORD ) );
+	if( NULL == pProcessInformationLink )
+	{
+		ExReleaseResource( &g_SyncResource );
+		KeLeaveCriticalRegion();
 
-		if( NULL == pProcessInformation )
-		{
-			ExFreePoolWithTag( pProcessInformationLink, 0 );
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
 
-			ExReleaseResource( &g_SyncResource );
-			KeLeaveCriticalRegion();
+	pProcessInformation = ( PPROCESS_INFORMATION_RECORD )AllocZeroPoolWithTag( PagedPool, sizeof( PROCESS_INFORMATION_RECORD ) );
 
-			return STATUS_INSUFFICIENT_RESOURCES;
-		}
-
-		RtlCopyMemory( pProcessInformation, pProcessInformationFind, sizeof( PROCESS_INFORMATION_RECORD ) );
-
-		pProcessInformationLink->pProcessInformation = pProcessInformation;
-
-		DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon StartWorkThreadManageProcessInfo insert new process information \n" );
-
-		InsertTailList( &g_ProcessInformationList, ( PLIST_ENTRY )pProcessInformationLink );
-
-		KeSetEvent( &g_EventProcessInformationAdded, 0, FALSE );
+	if( NULL == pProcessInformation )
+	{
+		ExFreePoolWithTag( pProcessInformationLink, 0 );
 
 		ExReleaseResource( &g_SyncResource );
 		KeLeaveCriticalRegion();
+
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	RtlCopyMemory( pProcessInformation, pProcessInformationFind, sizeof( PROCESS_INFORMATION_RECORD ) );
+
+	pProcessInformationLink->pProcessInformation = pProcessInformation;
+
+	DebugPrintEx( PROCESS_START_THREAD_INFO,  "netmon StartWorkThreadManageProcessInfo insert new process information \n" );
+
+	InsertTailList( &g_ProcessInformationList, ( PLIST_ENTRY )pProcessInformationLink );
+
+	KeSetEvent( &g_EventProcessInformationAdded, 0, FALSE );
+
+	ExReleaseResource( &g_SyncResource );
+	KeLeaveCriticalRegion();
 
 	return ntStatus;
 }
@@ -3870,28 +3815,28 @@ NTSTATUS  AttachToTdiDevice( PDRIVER_OBJECT DriverObject, PUNICODE_STRING Target
 		goto EXIT;
 	}
 
-		ntStatus = IoCreateDevice( 
-			DriverObject, 
-			sizeof( TDI_FILTER_DEVICE_EXTENSION ), 
-			NULL, 
-			FILE_DEVICE_NETWORK, 
-			0, 
-			0, 
-			&DeviceObject 
+	ntStatus = IoCreateDevice( 
+		DriverObject, 
+		sizeof( TDI_FILTER_DEVICE_EXTENSION ), 
+		NULL, 
+		FILE_DEVICE_NETWORK, 
+		0, 
+		0, 
+		&DeviceObject 
+		);
+
+	if( NT_SUCCESS( ntStatus ) )
+	{
+		DeviceObject->Flags |= DO_DIRECT_IO;
+		ntStatus = IoAttachDevice( 
+			DeviceObject, 
+			TargetDeviceName, 
+			( PDEVICE_OBJECT* )DeviceObject->DeviceExtension 
 			);
 
 		if( NT_SUCCESS( ntStatus ) )
-		{
-			DeviceObject->Flags |= DO_DIRECT_IO;
-			ntStatus = IoAttachDevice( 
-				DeviceObject, 
-				TargetDeviceName, 
-				( PDEVICE_OBJECT* )DeviceObject->DeviceExtension 
-				);
-
-			if( NT_SUCCESS( ntStatus ) )
-				*ppDeviceObject = DeviceObject;
-		}
+			*ppDeviceObject = DeviceObject;
+	}
 
 EXIT:
 	if ( !NT_SUCCESS( ntStatus ) )
@@ -3917,87 +3862,85 @@ PPROCESS_NETWORK_TRAFFIC GetProcessNetWorkTrafficInfoFromEProcess( PEPROCESS pEP
 	DebugPrintEx( PROCESS_NEW_IO_INFO, "netmon GetProcessNetWorkTrafficInfoFromEProcess KeAcquireSpinLock g_SpLockProcessNetWorkTrafficInfo \n" );
 	KeAcquireSpinLock( &g_SpLockProcessNetWorkTrafficInfo, &OldIrql );
 	
-	//_try
-	//{
-		pListEntry = g_ProcessIoInfoList.Flink;
+	pListEntry = g_ProcessIoInfoList.Flink;
 
-		for ( ; ; )
+	for ( ; ; )
+	{
+		if( pListEntry == &g_ProcessIoInfoList )
 		{
-			if( pListEntry == &g_ProcessIoInfoList )
-			{
-				break;
-			}
-
-			pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
-
-			if( pProcessNetWorkTrafficInfo->pEProcess == pEProcess )
-			{
-				ASSERT( pProcessNetWorkTrafficInfo->dwRefCount >= 1 );
-
-				InterlockedExchangeAdd( &pProcessNetWorkTrafficInfo->dwRefCount, 1 );
-				KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
-				return pProcessNetWorkTrafficInfo;
-			}
-
-			pListEntry = pListEntry->Flink;
+			break;
 		}
 
-		pNewProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )AllocZeroPoolWithTag( NonPagedPool, sizeof( PROCESS_NETWORK_TRAFFIC ) );
-		if( NULL == pNewProcessNetWorkTrafficInfo )
+		pProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )pListEntry;
+
+		if( pProcessNetWorkTrafficInfo->pEProcess == pEProcess )
 		{
-			goto RETURN_ERROR;
+			ASSERT( pProcessNetWorkTrafficInfo->dwRefCount >= 1 );
+
+			InterlockedExchangeAdd( &pProcessNetWorkTrafficInfo->dwRefCount, 1 );
+			KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
+			return pProcessNetWorkTrafficInfo;
 		}
 
-		pNewProcessNetWorkTrafficInfo->pTimer = AllocZeroPoolWithTag( NonPagedPool, sizeof( KTIMER ) );
-		pNewProcessNetWorkTrafficInfo->pDpc = AllocZeroPoolWithTag( NonPagedPool, sizeof( KDPC ) );
+		pListEntry = pListEntry->Flink;
+	}
 
-		if( NULL == pProcessNetWorkTrafficInfo->pTimer || 
-			NULL == pProcessNetWorkTrafficInfo->pDpc )
+	pNewProcessNetWorkTrafficInfo = ( PPROCESS_NETWORK_TRAFFIC )AllocZeroPoolWithTag( NonPagedPool, sizeof( PROCESS_NETWORK_TRAFFIC ) );
+	if( NULL == pNewProcessNetWorkTrafficInfo )
+	{
+		goto RETURN_ERROR;
+	}
+
+	pNewProcessNetWorkTrafficInfo->pTimer = AllocZeroPoolWithTag( NonPagedPool, sizeof( KTIMER ) );
+	pNewProcessNetWorkTrafficInfo->pDpc = AllocZeroPoolWithTag( NonPagedPool, sizeof( KDPC ) );
+
+	if( NULL == pProcessNetWorkTrafficInfo->pTimer || 
+		NULL == pProcessNetWorkTrafficInfo->pDpc )
+	{
+		goto RETURN_ERROR;
+	}
+
+	KeInitializeSpinLock( &pNewProcessNetWorkTrafficInfo->IrpListLock );
+
+	InitializeListHead( &pNewProcessNetWorkTrafficInfo->IrpList );
+
+	KeInitializeTimer( pNewProcessNetWorkTrafficInfo->pTimer );
+	KeInitializeDpc( pNewProcessNetWorkTrafficInfo->pDpc, TimerDpcProcess, ( PVOID )pEProcess );
+	KeSetTimer( pNewProcessNetWorkTrafficInfo->pTimer, g_TimerElapse, pNewProcessNetWorkTrafficInfo->pDpc );
+	pNewProcessNetWorkTrafficInfo->pEProcess = pEProcess;
+	pNewProcessNetWorkTrafficInfo->dwProcessId = ( DWORD )PsGetProcessId( pEProcess );
+
+	pNewProcessNetWorkTrafficInfo->SendingSpeed.LowPart = 1024;
+	pNewProcessNetWorkTrafficInfo->SendingSpeed.HighPart = 0;
+
+	pNewProcessNetWorkTrafficInfo->dwRefCount = PROCESS_NETWORK_TRAFFIC_INIT_REFERRENCE;
+	InsertHeadList( &g_ProcessIoInfoList, &pNewProcessNetWorkTrafficInfo->ProcessIoList );
+	DebugPrintEx( PROCESS_NEW_IO_INFO, "netmon Insert new process io information 0x%0.8x \n", pNewProcessNetWorkTrafficInfo );
+
+	KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
+
+	if( TRUE == InterlockedExchangeAdd( &g_bThreadsRunning, 0 ) )
+	{
+		KeSetEvent( &g_EventProcessInformationAdded, 0, FALSE );
+	}
+
+	return pNewProcessNetWorkTrafficInfo;
+
+RETURROR:
+	if( NULL != pNewProcessNetWorkTrafficInfo )
+	{
+		if ( NULL != pNewProcessNetWorkTrafficInfo->pDpc )
 		{
-			goto RETURN_ERROR;
+			ExFreePoolWithTag( pNewProcessNetWorkTrafficInfo->pDpc, 0 );;
 		}
-    
-		KeInitializeSpinLock( &pNewProcessNetWorkTrafficInfo->IrpListLock );
 
-		InitializeListHead( &pNewProcessNetWorkTrafficInfo->IrpList );
-
-		KeInitializeTimer( pNewProcessNetWorkTrafficInfo->pTimer );
-		KeInitializeDpc( pNewProcessNetWorkTrafficInfo->pDpc, TimerDpcProcess, ( PVOID )pEProcess );
-		KeSetTimer( pNewProcessNetWorkTrafficInfo->pTimer, g_TimerElapse, pNewProcessNetWorkTrafficInfo->pDpc );
-		pNewProcessNetWorkTrafficInfo->pEProcess = pEProcess;
-		pNewProcessNetWorkTrafficInfo->dwProcessId = ( DWORD )PsGetProcessId( pEProcess );
-
-		pNewProcessNetWorkTrafficInfo->SendingSpeed.LowPart = 1024;
-		pNewProcessNetWorkTrafficInfo->SendingSpeed.HighPart = 0;
-
-		pNewProcessNetWorkTrafficInfo->dwRefCount = PROCESS_NETWORK_TRAFFIC_INIT_REFERRENCE;
-		InsertHeadList( &g_ProcessIoInfoList, &pNewProcessNetWorkTrafficInfo->ProcessIoList );
-		DebugPrintEx( PROCESS_NEW_IO_INFO, "netmon Insert new process io information 0x%0.8x \n", pNewProcessNetWorkTrafficInfo );
-
-		KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
-
-		if( TRUE == InterlockedExchangeAdd( &g_bThreadsRunning, 0 ) )
+		if ( NULL != pNewProcessNetWorkTrafficInfo->pTimer )
 		{
-			KeSetEvent( &g_EventProcessInformationAdded, 0, FALSE );
+			ExFreePoolWithTag( pNewProcessNetWorkTrafficInfo->pTimer, 0 );
 		}
 
-		return pNewProcessNetWorkTrafficInfo;
-
-RETURN_ERROR:
-		if( NULL != pNewProcessNetWorkTrafficInfo )
-		{
-			if ( NULL != pNewProcessNetWorkTrafficInfo->pDpc )
-			{
-				ExFreePoolWithTag( pNewProcessNetWorkTrafficInfo->pDpc, 0 );;
-			}
-
-			if ( NULL != pNewProcessNetWorkTrafficInfo->pTimer )
-			{
-				ExFreePoolWithTag( pNewProcessNetWorkTrafficInfo->pTimer, 0 );
-			}
-
-			ExFreePoolWithTag( pNewProcessNetWorkTrafficInfo, 0 );
-		}
+		ExFreePoolWithTag( pNewProcessNetWorkTrafficInfo, 0 );
+	}
 
 	KeReleaseSpinLock( &g_SpLockProcessNetWorkTrafficInfo, OldIrql );
 
@@ -4138,37 +4081,37 @@ NTSTATUS  EnterUserProcessReadImagePath( PEPROCESS pEProcess, PUNICODE_STRING pI
 		return STATUS_INVALID_PARAMETER;
 	}
 
-		pPeb = PsGetProcessPeb( pEProcess );
+	pPeb = PsGetProcessPeb( pEProcess );
 
-		DebugPrintEx( READ_USER_PROC_PEB_INFO, "netmon Enter EnterUserProcessReadImagePath readed peb 0x%0.8x \n", pPeb );
+	DebugPrintEx( READ_USER_PROC_PEB_INFO, "netmon Enter EnterUserProcessReadImagePath readed peb 0x%0.8x \n", pPeb );
 
-		if( NULL == pPeb )
-		{
-			return STATUS_INVALID_PARAMETER;
-		}
+	if( NULL == pPeb )
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
 
-		if( pEProcess != IoGetCurrentProcess() )
-		{
-			KeStackAttachProcess( pEProcess, &ApcState );
-			bIsAttachToOtherProc = TRUE;
-		}
+	if( pEProcess != IoGetCurrentProcess() )
+	{
+		KeStackAttachProcess( pEProcess, &ApcState );
+		bIsAttachToOtherProc = TRUE;
+	}
 
-		ProbeForRead( pPeb, FIELD_OFFSET( PEB, SubSystemData ), 1 );
+	ProbeForRead( pPeb, FIELD_OFFSET( PEB, SubSystemData ), 1 );
 
-		pProcessParameters = pPeb->ProcessParameters;
+	pProcessParameters = pPeb->ProcessParameters;
 
-		ProbeForRead( pProcessParameters, FIELD_OFFSET( RTL_USER_PROCESS_PARAMETERS, CommandLine ), 1 );
-		ProbeForRead( pProcessParameters->ImagePathName.Buffer, pProcessParameters->ImagePathName.Length, 2 );
+	ProbeForRead( pProcessParameters, FIELD_OFFSET( RTL_USER_PROCESS_PARAMETERS, CommandLine ), 1 );
+	ProbeForRead( pProcessParameters->ImagePathName.Buffer, pProcessParameters->ImagePathName.Length, 2 );
 
-		if ( pImageFilePath->MaximumLength < pProcessParameters->ImagePathName.Length + pImageFilePath->Length )
-		{
-			ntStatus= STATUS_INSUFFICIENT_RESOURCES;
-		}
-		else
-		{
-			RtlCopyMemory( ( PBYTE )pImageFilePath->Buffer + pImageFilePath->Length, pProcessParameters->ImagePathName.Buffer, pProcessParameters->ImagePathName.Length);
-			pImageFilePath->Length += pProcessParameters->ImagePathName.Length;
-		}
+	if ( pImageFilePath->MaximumLength < pProcessParameters->ImagePathName.Length + pImageFilePath->Length )
+	{
+		ntStatus= STATUS_INSUFFICIENT_RESOURCES;
+	}
+	else
+	{
+		RtlCopyMemory( ( PBYTE )pImageFilePath->Buffer + pImageFilePath->Length, pProcessParameters->ImagePathName.Buffer, pProcessParameters->ImagePathName.Length);
+		pImageFilePath->Length += pProcessParameters->ImagePathName.Length;
+	}
 
 	if( TRUE == bIsAttachToOtherProc )
 	{
@@ -4298,151 +4241,151 @@ NTSTATUS  ShortPathNameToEntirePathName( PUNICODE_STRING ShortPathName, PUNICODE
 		return STATUS_INVALID_PARAMETER;
 	}
 
-		if( ShortPathName->Length < FILE_SYMBLOLIC_NAME_PREFIX_SIZE || 
-			ShortPathName->Buffer[ 0 ] != L'\\' || 
-			ShortPathName->Buffer[ 1 ] != L'?' || 
-			ShortPathName->Buffer[ 2 ] != L'?' || 
-			ShortPathName->Buffer[ 3 ] != L'\\' || 
-			ShortPathName->Buffer[ 5 ] != L':' || 
-			ShortPathName->Buffer[ 6 ] != L'\\' )
+	if( ShortPathName->Length < FILE_SYMBLOLIC_NAME_PREFIX_SIZE || 
+		ShortPathName->Buffer[ 0 ] != L'\\' || 
+		ShortPathName->Buffer[ 1 ] != L'?' || 
+		ShortPathName->Buffer[ 2 ] != L'?' || 
+		ShortPathName->Buffer[ 3 ] != L'\\' || 
+		ShortPathName->Buffer[ 5 ] != L':' || 
+		ShortPathName->Buffer[ 6 ] != L'\\' )
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	pFileInfo = NULL;
+	hFile = NULL;
+
+	__FullPathName.Length = 0;
+	__FullPathName.MaximumLength = COMMON_OBJ_NAME_MAX_LENGTH;
+	__FullPathName.Buffer = AllocZeroPoolWithTag( NonPagedPool, COMMON_OBJ_NAME_MAX_LENGTH );
+
+	if( NULL == __FullPathName.Buffer )
+	{
+		ntStatus = STATUS_INSUFFICIENT_RESOURCES;
+		goto RETURN_ERROR;
+	}
+
+	pFileInfo = AllocZeroPoolWithTag( NonPagedPool, COMMON_OBJ_NAME_MAX_LENGTH );
+
+	if( NULL == pFileInfo )
+	{
+		ntStatus = STATUS_INSUFFICIENT_RESOURCES;
+		goto RETURN_ERROR;
+	}
+
+	__ShortPathName.Buffer = ShortPathName->Buffer;
+	__ShortPathName.Length = FILE_SYMBLOLIC_NAME_PREFIX_SIZE;
+	__ShortPathName.MaximumLength = FILE_SYMBLOLIC_NAME_PREFIX_SIZE;
+
+	ntStatus = GetFileHandle( &hFile, &__ShortPathName );
+	if( !NT_SUCCESS( ntStatus ) )
+	{
+		goto RETURN_ERROR;
+	}
+
+	RtlCopyMemory( __FullPathName.Buffer, ShortPathName->Buffer, FILE_SYMBLOLIC_NAME_PREFIX_SIZE );
+
+	__FullPathName.Length = FILE_SYMBLOLIC_NAME_PREFIX_SIZE;
+	pwszAfterSymPrefix = ShortPathName->Buffer + FILE_SYMBLOLIC_NAME_PREFIX_SIZE / sizeof( WCHAR );
+
+	bPathEnd = FALSE;
+	dwWritedLength = FILE_SYMBLOLIC_NAME_PREFIX_SIZE;
+
+	for( ; ; )
+	{
+		if( ShortPathName->Length <= dwWritedLength )
 		{
-			return STATUS_INVALID_PARAMETER;
+			if( !NT_SUCCESS( ntStatus ) )
+			{
+				goto RETURN_ERROR;
+			}
+
+			goto OUTPUT_FULL_PATH;
 		}
 
-		pFileInfo = NULL;
-		hFile = NULL;
+		pwszPathDelim = FindWideCharInWideString( pwszAfterSymPrefix, 
+			( ShortPathName->Length - dwWritedLength ) / sizeof( WCHAR ), 
+			 PATH_DELIM 
+			);
 
-		__FullPathName.Length = 0;
-		__FullPathName.MaximumLength = COMMON_OBJ_NAME_MAX_LENGTH;
-		__FullPathName.Buffer = AllocZeroPoolWithTag( NonPagedPool, COMMON_OBJ_NAME_MAX_LENGTH );
-
-		if( NULL == __FullPathName.Buffer )
+		if( NULL == pwszPathDelim )
 		{
-			ntStatus = STATUS_INSUFFICIENT_RESOURCES;
-			goto RETURN_ERROR;
+			pwszPathDelim = ShortPathName->Buffer + ShortPathName->Length;
 		}
 
-		pFileInfo = AllocZeroPoolWithTag( NonPagedPool, COMMON_OBJ_NAME_MAX_LENGTH );
-
-		if( NULL == pFileInfo )
+		if( pwszPathDelim == ShortPathName->Buffer + ShortPathName->Length )
 		{
-			ntStatus = STATUS_INSUFFICIENT_RESOURCES;
-			goto RETURN_ERROR;
+			bPathEnd = TRUE;
 		}
 
-		__ShortPathName.Buffer = ShortPathName->Buffer;
-		__ShortPathName.Length = FILE_SYMBLOLIC_NAME_PREFIX_SIZE;
-		__ShortPathName.MaximumLength = FILE_SYMBLOLIC_NAME_PREFIX_SIZE;
+		ntStatus = QueryFileAndDirInfo( hFile, pwszAfterSymPrefix, pwszPathDelim, pFileInfo, COMMON_OBJ_NAME_MAX_LENGTH );
 
-		ntStatus = GetFileHandle( &hFile, &__ShortPathName );
 		if( !NT_SUCCESS( ntStatus ) )
 		{
 			goto RETURN_ERROR;
 		}
 
-		RtlCopyMemory( __FullPathName.Buffer, ShortPathName->Buffer, FILE_SYMBLOLIC_NAME_PREFIX_SIZE );
+		dwFileNameLength = pFileInfo->FileNameLength + ( DWORD )__FullPathName.Length + sizeof( WCHAR );
 
-		__FullPathName.Length = FILE_SYMBLOLIC_NAME_PREFIX_SIZE;
-		pwszAfterSymPrefix = ShortPathName->Buffer + FILE_SYMBLOLIC_NAME_PREFIX_SIZE / sizeof( WCHAR );
-
-		bPathEnd = FALSE;
-		dwWritedLength = FILE_SYMBLOLIC_NAME_PREFIX_SIZE;
-
-		for( ; ; )
-		{
-			if( ShortPathName->Length <= dwWritedLength )
-			{
-				if( !NT_SUCCESS( ntStatus ) )
-				{
-					goto RETURN_ERROR;
-				}
-
-				goto OUTPUT_FULL_PATH;
-			}
-
-			pwszPathDelim = FindWideCharInWideString( pwszAfterSymPrefix, 
-				( ShortPathName->Length - dwWritedLength ) / sizeof( WCHAR ), 
-				 PATH_DELIM 
-				);
-
-			if( NULL == pwszPathDelim )
-			{
-				pwszPathDelim = ShortPathName->Buffer + ShortPathName->Length;
-			}
-
-			if( pwszPathDelim == ShortPathName->Buffer + ShortPathName->Length )
-			{
-				bPathEnd = TRUE;
-			}
-
-			ntStatus = QueryFileAndDirInfo( hFile, pwszAfterSymPrefix, pwszPathDelim, pFileInfo, COMMON_OBJ_NAME_MAX_LENGTH );
-
-			if( !NT_SUCCESS( ntStatus ) )
-			{
-				goto RETURN_ERROR;
-			}
-
-			dwFileNameLength = pFileInfo->FileNameLength + ( DWORD )__FullPathName.Length + sizeof( WCHAR );
-
-			if( dwFileNameLength > __FullPathName.MaximumLength )
-			{
-				ntStatus = STATUS_INSUFFICIENT_RESOURCES;
-				goto RETURN_ERROR;
-			}
-
-			dwFileNameLength = __FullPathName.Length / sizeof( WCHAR );
-			if( __FullPathName.Buffer[ __FullPathName.Length / sizeof( WCHAR ) - 1 ] != L'\\' )
-			{
-				__FullPathName.Buffer[ __FullPathName.Length / sizeof( WCHAR ) ] = L'\\';
-				__FullPathName.Length += sizeof( WCHAR );
-			}
-
-			RtlCopyMemory( __FullPathName.Buffer + __FullPathName.Length, pFileInfo->FileName, pFileInfo->FileNameLength );
-			__FullPathName.Length += ( USHORT )pFileInfo->FileNameLength;
-
-			ZwClose( hFile );
-			hFile = NULL;
-
-			if( TRUE == bPathEnd )
-			{
-				goto OUTPUT_FULL_PATH;
-			}
-
-			__ShortPathName.MaximumLength = __ShortPathName.Length = ( PBYTE )pwszPathDelim - ( PBYTE )ShortPathName->Buffer;
-
-			ntStatus = GetFileHandle( &hFile, &__ShortPathName );
-
-			if( !NT_SUCCESS( ntStatus ) )
-			{
-				goto RETURN_ERROR;
-			}
-
-			dwWritedLength += ( pwszPathDelim - pwszAfterSymPrefix + 1 ) * sizeof( WCHAR );
-
-			pwszAfterSymPrefix = pwszPathDelim + 1;
-
-			if( pwszAfterSymPrefix < ShortPathName->Buffer + ShortPathName->Length  )
-			{
-				continue;
-			}
-
-			ntStatus = STATUS_INVALID_PARAMETER;
-			goto RETURN_ERROR;
-		}
-
-OUTPUT_FULL_PATH:
-		FullPathName->Length = __FullPathName.Length;
-		FullPathName->MaximumLength = __FullPathName.MaximumLength;
-
-		FullPathName->Buffer = AllocZeroPoolWithTag( NonPagedPool, __FullPathName.Length );
-
-		if( NULL == FullPathName->Buffer )
+		if( dwFileNameLength > __FullPathName.MaximumLength )
 		{
 			ntStatus = STATUS_INSUFFICIENT_RESOURCES;
 			goto RETURN_ERROR;
 		}
 
-		RtlCopyMemory( FullPathName->Buffer, __FullPathName.Buffer, __FullPathName.Length );
+		dwFileNameLength = __FullPathName.Length / sizeof( WCHAR );
+		if( __FullPathName.Buffer[ __FullPathName.Length / sizeof( WCHAR ) - 1 ] != L'\\' )
+		{
+			__FullPathName.Buffer[ __FullPathName.Length / sizeof( WCHAR ) ] = L'\\';
+			__FullPathName.Length += sizeof( WCHAR );
+		}
+
+		RtlCopyMemory( __FullPathName.Buffer + __FullPathName.Length, pFileInfo->FileName, pFileInfo->FileNameLength );
+		__FullPathName.Length += ( USHORT )pFileInfo->FileNameLength;
+
+		ZwClose( hFile );
+		hFile = NULL;
+
+		if( TRUE == bPathEnd )
+		{
+			goto OUTPUT_FULL_PATH;
+		}
+
+		__ShortPathName.MaximumLength = __ShortPathName.Length = ( PBYTE )pwszPathDelim - ( PBYTE )ShortPathName->Buffer;
+
+		ntStatus = GetFileHandle( &hFile, &__ShortPathName );
+
+		if( !NT_SUCCESS( ntStatus ) )
+		{
+			goto RETURN_ERROR;
+		}
+
+		dwWritedLength += ( pwszPathDelim - pwszAfterSymPrefix + 1 ) * sizeof( WCHAR );
+
+		pwszAfterSymPrefix = pwszPathDelim + 1;
+
+		if( pwszAfterSymPrefix < ShortPathName->Buffer + ShortPathName->Length  )
+		{
+			continue;
+		}
+
+		ntStatus = STATUS_INVALID_PARAMETER;
+		goto RETURN_ERROR;
+	}
+
+OUTPUT_FULL_PATH:
+	FullPathName->Length = __FullPathName.Length;
+	FullPathName->MaximumLength = __FullPathName.MaximumLength;
+
+	FullPathName->Buffer = AllocZeroPoolWithTag( NonPagedPool, __FullPathName.Length );
+
+	if( NULL == FullPathName->Buffer )
+	{
+		ntStatus = STATUS_INSUFFICIENT_RESOURCES;
+		goto RETURN_ERROR;
+	}
+
+	RtlCopyMemory( FullPathName->Buffer, __FullPathName.Buffer, __FullPathName.Length );
 
 RETURN_ERROR:
 	if( NULL != __FullPathName.Buffer )
@@ -4489,243 +4432,243 @@ NTSTATUS  GetProcessImagePath( DWORD dwProcessId, PUNICODE_STRING ProcessImageFi
 	bFullPath = FALSE;
 	pFileDosDeviceName = NULL;
 
-		ntStatus = PsLookupProcessByProcessId( ( HANDLE )dwProcessId, &pEProcess );
-		if( !NT_SUCCESS( ntStatus ) )
+	ntStatus = PsLookupProcessByProcessId( ( HANDLE )dwProcessId, &pEProcess );
+	if( !NT_SUCCESS( ntStatus ) )
+	{
+		goto RETURN_ERROR;
+	}
+
+	ntStatus = ObOpenObjectByPointer( 
+		pEProcess, 
+		OBJ_KERNEL_HANDLE, 
+		NULL, 
+		FILE_ALL_ACCESS, 
+		NULL, 
+		KernelMode, 
+		&hProcess 
+		);
+
+	if( !NT_SUCCESS( ntStatus ) )
+	{
+		goto RETURN_ERROR;
+	}
+
+	ntStatus = ZwQueryInformationProcess(
+		hProcess,
+		ProcessImageFileName,
+		ProcessImageFilePath,
+		dwBufferLen,
+		&ImageFilePathLength 
+		);
+
+	if( !NT_SUCCESS( ntStatus ) )
+	{
+		goto RETURN_ERROR;
+	}
+
+	InitializeObjectAttributes( 
+		&ObjectAttributes, 
+		ProcessImageFilePath, 
+		OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+		NULL, 
+		NULL 
+		);
+
+	ntStatus = ZwOpenFile(
+		&hFileDirect,
+		GENERIC_READ,
+		&ObjectAttributes,
+		&IoStatusBlock,
+		FILE_SHARE_READ,
+		FILE_SYNCHRONOUS_IO_NONALERT 
+		); //First get process image file path by its process handle
+
+	if( NT_SUCCESS( ntStatus ) )
+	{
+		if ( NULL != FindWideCharInWideString( 
+			ProcessImageFilePath->Buffer,
+			ProcessImageFilePath->Length / sizeof( WCHAR ),
+			SHORT_PATH_SIGN 
+			) )
 		{
-			goto RETURN_ERROR;
-		}
-
-		ntStatus = ObOpenObjectByPointer( 
-			pEProcess, 
-			OBJ_KERNEL_HANDLE, 
-			NULL, 
-			FILE_ALL_ACCESS, 
-			NULL, 
-			KernelMode, 
-			&hProcess 
-			);
-
-		if( !NT_SUCCESS( ntStatus ) )
-		{
-			goto RETURN_ERROR;
-		}
-
-		ntStatus = ZwQueryInformationProcess(
-			hProcess,
-			ProcessImageFileName,
-			ProcessImageFilePath,
-			dwBufferLen,
-			&ImageFilePathLength 
-			);
-
-		if( !NT_SUCCESS( ntStatus ) )
-		{
-			goto RETURN_ERROR;
-		}
-
-		InitializeObjectAttributes( 
-			&ObjectAttributes, 
-			ProcessImageFilePath, 
-			OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
-			NULL, 
-			NULL 
-			);
-
-		ntStatus = ZwOpenFile(
-			&hFileDirect,
-			GENERIC_READ,
-			&ObjectAttributes,
-			&IoStatusBlock,
-			FILE_SHARE_READ,
-			FILE_SYNCHRONOUS_IO_NONALERT 
-			); //First get process image file path by its process handle
-
-		if( NT_SUCCESS( ntStatus ) )
-		{
-			if ( NULL != FindWideCharInWideString( 
-				ProcessImageFilePath->Buffer,
-				ProcessImageFilePath->Length / sizeof( WCHAR ),
-				SHORT_PATH_SIGN 
-				) )
-			{
-				bFullPath = TRUE;
-				FileDosName.MaximumLength = COMMON_OBJ_NAME_MAX_LENGTH;
-				FileDosName.Buffer = AllocZeroPoolWithTag( NonPagedPool, COMMON_OBJ_NAME_MAX_LENGTH );
-
-				if ( NULL == FileDosName.Buffer )
-				{
-					ntStatus= STATUS_INSUFFICIENT_RESOURCES;
-					goto RETURN_ERROR;
-				}
-
-				RtlCopyMemory( FileDosName.Buffer, DOS_DEVICE_NAME_PREFIX, CONST_STRING_SIZE( DOS_DEVICE_NAME_PREFIX ) );
-
-				FileDosName.Length = CONST_STRING_SIZE( DOS_DEVICE_NAME_PREFIX );
-
-				ntStatus = ObReferenceObjectByHandle( 
-					hFileDirect, 
-					0, 
-					*IoFileObjectType, 
-					0, 
-					&pFileDirectObject, 
-					0
-					);
-
-				if( !NT_SUCCESS( ntStatus ) )
-				{
-					goto RETURN_ERROR;
-				}
-
-				ntStatus = IoQueryFileDosDeviceName( pFileDirectObject, &pFileDosDeviceName );
-				if( !NT_SUCCESS( ntStatus ) )
-				{
-					goto RETURN_ERROR;
-				}
-
-				ASSERT( NULL != pFileDosDeviceName && NULL != pFileDosDeviceName->Name.Buffer );
-				if( FileDosName.MaximumLength < FileDosName.Length + pFileDosDeviceName->Name.Length )
-				{
-					ntStatus = STATUS_INSUFFICIENT_RESOURCES;
-					goto RETURN_ERROR;
-				}
-
-				RtlCopyMemory( 
-					( FileDosName.Buffer + FileDosName.Length ), 
-					pFileDosDeviceName->Name.Buffer, 
-					pFileDosDeviceName->Name.Length 
-					);
-
-				FileDosName.Length += pFileDosDeviceName->Name.Length;
-
-				ntStatus = ShortPathNameToEntirePathName( &FileDosName, &FullPathName );
-				if( !NT_SUCCESS( ntStatus ) )
-				{
-					goto RETURN_ERROR;
-				}
-
-				InitializeObjectAttributes( 
-					&ObjectAttributes, 
-					&FullPathName,
-					OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, 
-					NULL,
-					NULL
-					);
-
-				ntStatus = ZwCreateFile(
-					&hFileIndirect,
-					GENERIC_READ,
-					&ObjectAttributes,
-					&IoStatusBlock,
-					NULL,
-					FILE_ATTRIBUTE_NORMAL,
-					FILE_SHARE_READ,
-					FILE_OPEN,
-					FILE_SYNCHRONOUS_IO_NONALERT,
-					NULL,
-					0
-					);
-
-				if( !NT_SUCCESS( ntStatus ) )
-				{
-					goto RETURN_ERROR;
-				}
-
-				ntStatus = ObReferenceObjectByHandle(
-					hFileIndirect,
-					0,
-					*IoFileObjectType,
-					KernelMode,
-					&pFileIndirectObject,
-					NULL
-					);
-
-				if( !NT_SUCCESS( ntStatus ) )
-				{
-					goto RETURN_ERROR;
-				}
-
-				ntStatus = ObQueryNameString( 
-					pFileIndirectObject, 
-					( POBJECT_NAME_INFORMATION )ProcessImageFilePath, 
-					dwBufferLen, 
-					&ImageFilePathLength
-					);
-			}
-		}
-		else
-		{
+			bFullPath = TRUE;
 			FileDosName.MaximumLength = COMMON_OBJ_NAME_MAX_LENGTH;
 			FileDosName.Buffer = AllocZeroPoolWithTag( NonPagedPool, COMMON_OBJ_NAME_MAX_LENGTH );
 
 			if ( NULL == FileDosName.Buffer )
 			{
-				ntStatus = STATUS_INSUFFICIENT_RESOURCES;
+				ntStatus= STATUS_INSUFFICIENT_RESOURCES;
 				goto RETURN_ERROR;
 			}
 
 			RtlCopyMemory( FileDosName.Buffer, DOS_DEVICE_NAME_PREFIX, CONST_STRING_SIZE( DOS_DEVICE_NAME_PREFIX ) );
+
 			FileDosName.Length = CONST_STRING_SIZE( DOS_DEVICE_NAME_PREFIX );
 
-			ntStatus = EnterUserProcessReadImagePath( pEProcess, &FileDosName );
+			ntStatus = ObReferenceObjectByHandle( 
+				hFileDirect, 
+				0, 
+				*IoFileObjectType, 
+				0, 
+				&pFileDirectObject, 
+				0
+				);
+
 			if( !NT_SUCCESS( ntStatus ) )
 			{
 				goto RETURN_ERROR;
 			}
 
-			if( NULL == FindWideCharInWideString(
-				( LPCWSTR )FileDosName.Buffer,
-				FileDosName.Length / sizeof( WCHAR ), 
-				SHORT_PATH_SIGN
-				) )
+			ntStatus = IoQueryFileDosDeviceName( pFileDirectObject, &pFileDosDeviceName );
+			if( !NT_SUCCESS( ntStatus ) )
 			{
-				InitializeObjectAttributes( 
-					&ObjectAttributes, 
-					&FileDosName, 
-					OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
-					NULL, 
-					NULL
-					);
-
-				ntStatus= ZwCreateFile(
-					&hFileIndirect,
-					GENERIC_READ,
-					&ObjectAttributes,
-					&IoStatusBlock,
-					0,
-					FILE_ATTRIBUTE_NORMAL,
-					FILE_SHARE_READ,
-					FILE_OPEN,
-					FILE_SYNCHRONOUS_IO_NONALERT,
-					NULL,
-					0 );
-
-				if( !NT_SUCCESS( ntStatus ) )
-				{
-					goto RETURN_ERROR;
-				}
-
-				ntStatus = ObReferenceObjectByHandle(
-					hFileIndirect, 
-					0,
-					*IoFileObjectType,
-					KernelMode,
-					&pFileIndirectObject,
-					NULL
-					);
-
-				if( !NT_SUCCESS( ntStatus ) )
-				{
-					goto RETURN_ERROR;
-				}
-
-				ntStatus = ObQueryNameString( 
-					pFileIndirectObject, 
-					( POBJECT_NAME_INFORMATION )ProcessImageFilePath, 
-					dwBufferLen, 
-					&ImageFilePathLength
-					);
+				goto RETURN_ERROR;
 			}
+
+			ASSERT( NULL != pFileDosDeviceName && NULL != pFileDosDeviceName->Name.Buffer );
+			if( FileDosName.MaximumLength < FileDosName.Length + pFileDosDeviceName->Name.Length )
+			{
+				ntStatus = STATUS_INSUFFICIENT_RESOURCES;
+				goto RETURN_ERROR;
+			}
+
+			RtlCopyMemory( 
+				( FileDosName.Buffer + FileDosName.Length ), 
+				pFileDosDeviceName->Name.Buffer, 
+				pFileDosDeviceName->Name.Length 
+				);
+
+			FileDosName.Length += pFileDosDeviceName->Name.Length;
+
+			ntStatus = ShortPathNameToEntirePathName( &FileDosName, &FullPathName );
+			if( !NT_SUCCESS( ntStatus ) )
+			{
+				goto RETURN_ERROR;
+			}
+
+			InitializeObjectAttributes( 
+				&ObjectAttributes, 
+				&FullPathName,
+				OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, 
+				NULL,
+				NULL
+				);
+
+			ntStatus = ZwCreateFile(
+				&hFileIndirect,
+				GENERIC_READ,
+				&ObjectAttributes,
+				&IoStatusBlock,
+				NULL,
+				FILE_ATTRIBUTE_NORMAL,
+				FILE_SHARE_READ,
+				FILE_OPEN,
+				FILE_SYNCHRONOUS_IO_NONALERT,
+				NULL,
+				0
+				);
+
+			if( !NT_SUCCESS( ntStatus ) )
+			{
+				goto RETURN_ERROR;
+			}
+
+			ntStatus = ObReferenceObjectByHandle(
+				hFileIndirect,
+				0,
+				*IoFileObjectType,
+				KernelMode,
+				&pFileIndirectObject,
+				NULL
+				);
+
+			if( !NT_SUCCESS( ntStatus ) )
+			{
+				goto RETURN_ERROR;
+			}
+
+			ntStatus = ObQueryNameString( 
+				pFileIndirectObject, 
+				( POBJECT_NAME_INFORMATION )ProcessImageFilePath, 
+				dwBufferLen, 
+				&ImageFilePathLength
+				);
 		}
+	}
+	else
+	{
+		FileDosName.MaximumLength = COMMON_OBJ_NAME_MAX_LENGTH;
+		FileDosName.Buffer = AllocZeroPoolWithTag( NonPagedPool, COMMON_OBJ_NAME_MAX_LENGTH );
+
+		if ( NULL == FileDosName.Buffer )
+		{
+			ntStatus = STATUS_INSUFFICIENT_RESOURCES;
+			goto RETURN_ERROR;
+		}
+
+		RtlCopyMemory( FileDosName.Buffer, DOS_DEVICE_NAME_PREFIX, CONST_STRING_SIZE( DOS_DEVICE_NAME_PREFIX ) );
+		FileDosName.Length = CONST_STRING_SIZE( DOS_DEVICE_NAME_PREFIX );
+
+		ntStatus = EnterUserProcessReadImagePath( pEProcess, &FileDosName );
+		if( !NT_SUCCESS( ntStatus ) )
+		{
+			goto RETURN_ERROR;
+		}
+
+		if( NULL == FindWideCharInWideString(
+			( LPCWSTR )FileDosName.Buffer,
+			FileDosName.Length / sizeof( WCHAR ), 
+			SHORT_PATH_SIGN
+			) )
+		{
+			InitializeObjectAttributes( 
+				&ObjectAttributes, 
+				&FileDosName, 
+				OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+				NULL, 
+				NULL
+				);
+
+			ntStatus= ZwCreateFile(
+				&hFileIndirect,
+				GENERIC_READ,
+				&ObjectAttributes,
+				&IoStatusBlock,
+				0,
+				FILE_ATTRIBUTE_NORMAL,
+				FILE_SHARE_READ,
+				FILE_OPEN,
+				FILE_SYNCHRONOUS_IO_NONALERT,
+				NULL,
+				0 );
+
+			if( !NT_SUCCESS( ntStatus ) )
+			{
+				goto RETURN_ERROR;
+			}
+
+			ntStatus = ObReferenceObjectByHandle(
+				hFileIndirect, 
+				0,
+				*IoFileObjectType,
+				KernelMode,
+				&pFileIndirectObject,
+				NULL
+				);
+
+			if( !NT_SUCCESS( ntStatus ) )
+			{
+				goto RETURN_ERROR;
+			}
+
+			ntStatus = ObQueryNameString( 
+				pFileIndirectObject, 
+				( POBJECT_NAME_INFORMATION )ProcessImageFilePath, 
+				dwBufferLen, 
+				&ImageFilePathLength
+				);
+		}
+	}
 
 RETURN_ERROR:
 	if( NULL != pEProcess )
@@ -4773,15 +4716,10 @@ RETURN_ERROR:
 
 NTSTATUS RegisterProcessCreateNotify()
 {
-	NTSTATUS ntStatus;
-
-	ntStatus = PsSetCreateProcessNotifyRoutine( ( PCREATE_PROCESS_NOTIFY_ROUTINE )DeleteProcessIoInfo, FALSE );
-	return ntStatus;
+	return PsSetCreateProcessNotifyRoutine( ( PCREATE_PROCESS_NOTIFY_ROUTINE )DeleteProcessIoInfo, FALSE );
 }
 
 NTSTATUS DeregisterProcessCreateNotify()
 {
-	NTSTATUS ntStatus;
-	ntStatus = PsSetCreateProcessNotifyRoutine( ( PCREATE_PROCESS_NOTIFY_ROUTINE )DeleteProcessIoInfo, TRUE );
-	return ntStatus;
+	return PsSetCreateProcessNotifyRoutine( ( PCREATE_PROCESS_NOTIFY_ROUTINE )DeleteProcessIoInfo, TRUE );
 }
