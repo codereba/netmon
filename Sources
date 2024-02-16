@@ -10,4 +10,3 @@ SOURCES=netmon.c \
 		hash.c \
 		common.c \
 		netmon.rc
-
